@@ -20,8 +20,6 @@ local HOLD_DURATION         = 2.0
 local DOUBLE_JUMP_POWER     = 0.6  -- multiplier of normal JumpPower (0.5 = half height, 1.0 = full height)
 local LINE_ESP_DISTANCE     = 40  -- studs radius for ESP (players within this get lines + outline)
 -- (fixed internally, no longer user-configurable)
-local UNREACHABLE_HEIGHT    = 9   -- studs above you before target is "too high"
-local UNREACHABLE_HORIZ     = 8
 
 -- -----------------------------------------------------
 --  STATE
@@ -52,9 +50,17 @@ local doubleJumpOn    = false  -- Double Jump toggle
 local doubleJumpUsed  = false  -- tracks if air jump already used this flight
 local doubleJumpConn  = nil
 
-local stopDelayOn     = false  -- Stop delay toggle
-local STOP_DELAY      = 0.5   -- seconds to pause when bomb just equipped
-local stopDelayUntil  = 0     -- tick() deadline, compared in tracking loop
+-- Flick state
+local isBlatantFlicking  = false
+local flickMiniVisible   = false
+local flickMiniLocked    = false
+local BLATANT_STEP       = "BlatantFlickStep"
+local BLATANT_PRIORITY   = Enum.RenderPriority.Last.Value + 2
+local BLATANT_ANGLE      = math.rad(100)
+local BLATANT_OUT_TIME   = 0.07
+local BLATANT_HOLD_TIME  = 0.05
+local BLATANT_BACK_TIME  = 0.20
+local FLICK_HOLD_DURATION = 1.5
 
 -- -----------------------------------------------------
 --  LOGIC HELPERS
@@ -155,17 +161,7 @@ local function startTracking()
 		if not hasBomb then
 			local h, r = getHum(), getRoot()
 			if h and r then h:MoveTo(r.Position) end
-			currentTarget = nil
-			-- Arm stop delay for when bomb is next picked up
-			if stopDelayOn then stopDelayUntil = now + STOP_DELAY end
-			return
-		end
-
-		-- Stop delay: pause tracking briefly right after picking up the bomb
-		if stopDelayOn and now < stopDelayUntil then
-			local h, r = getHum(), getRoot()
-			if h and r then h:MoveTo(r.Position) end
-			return
+			currentTarget = nil; return
 		end
 
 		-- Arena check - exact same as auto bomb uses
@@ -210,27 +206,8 @@ local function startTracking()
 		local tChar = currentTarget.Character
 		local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
 		if not tRoot then currentTarget = nil; return end
-
-		-- Reachability check:
-		-- If the target is significantly higher than us AND far enough
-		-- horizontally that we can't just jump to them, consider them
-		-- unreachable — stop MoveTo and let the player navigate manually.
-		local dy         = tRoot.Position.Y - root.Position.Y
-		local horizDist  = Vector2.new(tRoot.Position.X - root.Position.X, tRoot.Position.Z - root.Position.Z).Magnitude
-		-- "Unreachable" = target is more than 12 studs above us
-		-- AND more than 6 studs away horizontally (so we can't just stand below and jump)
-		local unreachable = dy > UNREACHABLE_HEIGHT and horizDist > UNREACHABLE_HORIZ
-
-		if unreachable then
-			-- Don't MoveTo — player must navigate there manually
-			return
-		end
-
-		hum:MoveTo(tRoot.Position + Vector3.new(
-			(math.random() - 0.5) * 1.4,
-			0,
-			(math.random() - 0.5) * 1.4
-		))
+		hum:MoveTo(tRoot.Position)
+		local dy = tRoot.Position.Y - root.Position.Y
 		if dy > JUMP_HEIGHT_THRESHOLD and now - lastJump >= JUMP_COOLDOWN then
 			lastJump = now; hum.Jump = true
 		end
@@ -376,11 +353,6 @@ local function startAutoBomb()
 		local carrierRoot = bestChar:FindFirstChild("HumanoidRootPart")
 		if not carrierRoot then return end
 
-		-- Get the Bomb tool's handle position for more precise targeting
-		local bombTool2 = bestChar:FindFirstChild("Bomb")
-		local bombHandle = bombTool2 and bombTool2:FindFirstChildWhichIsA("BasePart")
-		local bombPosition = (bombHandle and bombHandle.Position) or carrierRoot.Position
-
 		-- Read countdown on the bomb carrier
 		local countNum, countTxt = findCountdownNumber(bestChar)
 		-- Never grab at 1 sec or below - too dangerous, player will die
@@ -388,7 +360,7 @@ local function startAutoBomb()
 		local shouldGo = not tooLate and ((countNum == nil) or (countNum <= AUTOBOMB_COUNTDOWN))
 
 		if shouldGo then
-			hum:MoveTo(bombPosition)
+			hum:MoveTo(carrierRoot.Position)
 			if autoBombStatusVal then
 				local label = countTxt and ("GRABBING " .. countTxt) or "GRABBING"
 				autoBombStatusVal.Text       = label .. "  [" .. math.floor(bestDist) .. "st]"
@@ -419,6 +391,82 @@ local function stopAutoBomb()
 		autoBombStatusVal.Text       = "-"
 		autoBombStatusVal.TextColor3 = Color3.fromRGB(180, 180, 180)
 	end
+end
+
+-- =====================================================
+--  BLATANT FLICK LOGIC
+--  Rotates HRP out and back. If airborne, jumps first,
+--  then flicks, then does the mid-air second jump.
+-- =====================================================
+
+local function blatantFlick()
+	if isBlatantFlicking then return end
+	local character = LocalPlayer.Character
+	if not character then return end
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	local hum = getHum()
+	if not hrp or not hum then return end
+
+	isBlatantFlicking = true
+
+	-- Check if airborne — if so, do a mid-air jump before AND after the flick
+	local state     = hum:GetState()
+	local wasAirborne = state == Enum.HumanoidStateType.Freefall
+		or state == Enum.HumanoidStateType.Jumping
+
+	-- First jump (pre-flick boost if airborne)
+	if wasAirborne then
+		local vel = hrp.AssemblyLinearVelocity
+		hrp.AssemblyLinearVelocity = Vector3.new(vel.X, hum.JumpPower * DOUBLE_JUMP_POWER, vel.Z)
+	end
+
+	local flatYaw        = math.atan2(-hrp.CFrame.LookVector.X, -hrp.CFrame.LookVector.Z)
+	local originRotation = CFrame.fromAxisAngle(Vector3.new(0, 1, 0), flatYaw)
+	local startTime      = tick()
+
+	RunService:BindToRenderStep(BLATANT_STEP, BLATANT_PRIORITY, function()
+		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if not root then
+			RunService:UnbindFromRenderStep(BLATANT_STEP)
+			isBlatantFlicking = false
+			return
+		end
+
+		local elapsed = tick() - startTime
+		local angle
+
+		if elapsed < BLATANT_OUT_TIME then
+			local t = elapsed / BLATANT_OUT_TIME
+			angle = BLATANT_ANGLE * (t * t)
+
+		elseif elapsed < BLATANT_OUT_TIME + BLATANT_HOLD_TIME then
+			angle = BLATANT_ANGLE
+
+		elseif elapsed < BLATANT_OUT_TIME + BLATANT_HOLD_TIME + BLATANT_BACK_TIME then
+			local t = (elapsed - BLATANT_OUT_TIME - BLATANT_HOLD_TIME) / BLATANT_BACK_TIME
+			local eased = 1 - (1 - t) ^ 4
+			angle = BLATANT_ANGLE * (1 - eased)
+
+		else
+			root.CFrame = CFrame.new(root.Position) * originRotation
+			RunService:UnbindFromRenderStep(BLATANT_STEP)
+			isBlatantFlicking = false
+
+			-- Post-flick mid-air jump if still airborne
+			local h = getHum()
+			local r = getRoot()
+			if h and r then
+				local s = h:GetState()
+				if s == Enum.HumanoidStateType.Freefall or s == Enum.HumanoidStateType.Jumping then
+					local v = r.AssemblyLinearVelocity
+					r.AssemblyLinearVelocity = Vector3.new(v.X, h.JumpPower * DOUBLE_JUMP_POWER, v.Z)
+				end
+			end
+			return
+		end
+
+		root.CFrame = CFrame.new(root.Position) * originRotation * CFrame.Angles(0, angle, 0)
+	end)
 end
 
 -- =====================================================
@@ -686,7 +734,7 @@ end
 --  UIStroke / shadow sit outside fine.
 -- =====================================================
 
-local WIN_H = 344  -- main panel height
+local WIN_H = 300  -- main panel height
 
 local Win = Instance.new("Frame", SG)
 Win.Name             = "Window"
@@ -935,83 +983,10 @@ Div2.Position         = UDim2.new(0, 12, 0, 97)
 Div2.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
 Div2.BorderSizePixel  = 0
 
--- -- STOP DELAY row (toggle + textbox) ---------------
-local StopRow = Instance.new("Frame", MainPanel)
-StopRow.Size               = UDim2.new(1, -24, 0, 34)
-StopRow.Position           = UDim2.new(0, 12, 0, 106)
-StopRow.BackgroundColor3   = Color3.fromRGB(12, 12, 12)
-StopRow.BorderSizePixel    = 0
-Instance.new("UICorner", StopRow).CornerRadius = UDim.new(0, 9)
-local StopRowStroke = Instance.new("UIStroke", StopRow)
-StopRowStroke.Color        = Color3.fromRGB(40, 40, 40)
-StopRowStroke.Thickness    = 1
-StopRowStroke.Transparency = 0.25
-
-local StopLabel = Instance.new("TextLabel", StopRow)
-StopLabel.Size               = UDim2.new(0, 64, 1, 0)
-StopLabel.Position           = UDim2.new(0, 10, 0, 0)
-StopLabel.BackgroundTransparency = 1
-StopLabel.Text               = "Stop"
-StopLabel.TextColor3         = Color3.fromRGB(175, 175, 175)
-StopLabel.TextSize           = 10
-StopLabel.Font               = Enum.Font.GothamBold
-StopLabel.TextXAlignment     = Enum.TextXAlignment.Left
-
-local StopToggle = Instance.new("TextButton", StopRow)
-StopToggle.Size             = UDim2.new(0, 36, 0, 18)
-StopToggle.Position         = UDim2.new(0, 78, 0.5, -9)
-StopToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
-StopToggle.Text             = ""
-StopToggle.BorderSizePixel  = 0
-StopToggle.AutoButtonColor  = false
-StopToggle.ZIndex           = 6
-Instance.new("UICorner", StopToggle).CornerRadius = UDim.new(1, 0)
-local StopToggleStroke = Instance.new("UIStroke", StopToggle)
-StopToggleStroke.Color        = Color3.fromRGB(60, 60, 60)
-StopToggleStroke.Thickness    = 1
-StopToggleStroke.Transparency = 0.2
-local StopThumb = Instance.new("Frame", StopToggle)
-StopThumb.Size             = UDim2.new(0, 12, 0, 12)
-StopThumb.Position         = UDim2.new(0, 3, 0.5, -6)
-StopThumb.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
-StopThumb.BorderSizePixel  = 0
-StopThumb.ZIndex           = 7
-Instance.new("UICorner", StopThumb).CornerRadius = UDim.new(1, 0)
-
-local StopBox = Instance.new("TextBox", StopRow)
-StopBox.Size               = UDim2.new(0, 40, 0, 20)
-StopBox.Position           = UDim2.new(1, -84, 0.5, -10)
-StopBox.BackgroundColor3   = Color3.fromRGB(20, 20, 20)
-StopBox.Text               = "0.5"
-StopBox.TextColor3         = Color3.fromRGB(210, 210, 210)
-StopBox.TextSize           = 10
-StopBox.Font               = Enum.Font.GothamBold
-StopBox.ClearTextOnFocus   = false
-StopBox.PlaceholderText    = "0.5"
-StopBox.PlaceholderColor3  = Color3.fromRGB(70, 70, 70)
-StopBox.BorderSizePixel    = 0
-StopBox.ZIndex             = 6
-StopBox.TextXAlignment     = Enum.TextXAlignment.Center
-Instance.new("UICorner", StopBox).CornerRadius = UDim.new(0, 5)
-local StopBoxStroke = Instance.new("UIStroke", StopBox)
-StopBoxStroke.Color        = Color3.fromRGB(55, 55, 55)
-StopBoxStroke.Thickness    = 1
-StopBoxStroke.Transparency = 0.2
-
-local StopUnit = Instance.new("TextLabel", StopRow)
-StopUnit.Size               = UDim2.new(0, 22, 0, 20)
-StopUnit.Position           = UDim2.new(1, -42, 0.5, -10)
-StopUnit.BackgroundTransparency = 1
-StopUnit.Text               = "sec"
-StopUnit.TextColor3         = Color3.fromRGB(70, 70, 70)
-StopUnit.TextSize           = 8
-StopUnit.Font               = Enum.Font.Gotham
-StopUnit.ZIndex             = 7
-
 -- -- AUTO GET BOMB Card (main panel) -----------------
 local BombCard = Instance.new("Frame", MainPanel)
 BombCard.Size             = UDim2.new(1, -24, 0, 80)
-BombCard.Position         = UDim2.new(0, 12, 0, 150)
+BombCard.Position         = UDim2.new(0, 12, 0, 106)
 BombCard.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
 BombCard.BorderSizePixel  = 0
 Instance.new("UICorner", BombCard).CornerRadius = UDim.new(0, 10)
@@ -1167,7 +1142,7 @@ local SettingsPanel = Instance.new("ScrollingFrame", TabContainer)
 SettingsPanel.Size                = UDim2.new(0, 240, 1, 0)
 SettingsPanel.Position            = UDim2.new(0, 240, 0, 0)
 SettingsPanel.BackgroundTransparency = 1
-SettingsPanel.CanvasSize          = UDim2.new(0, 0, 0, 258)
+SettingsPanel.CanvasSize          = UDim2.new(0, 0, 0, 362)
 SettingsPanel.ScrollBarThickness  = 3
 SettingsPanel.ScrollBarImageColor3 = Color3.fromRGB(230, 230, 230)
 SettingsPanel.ScrollBarImageTransparency = 0.5
@@ -1460,6 +1435,120 @@ Instance.new("UICorner", SGThumb).CornerRadius = UDim.new(1, 0)
 -- Wire up the forward-declared reference to the main panel card status
 autoBombStatusVal = BombStatusVal
 
+-- -- Flick button row ----------------------------------
+local FlickDivider = Instance.new("Frame", SettingsPanel)
+FlickDivider.Size             = UDim2.new(1, -24, 0, 1)
+FlickDivider.Position         = UDim2.new(0, 12, 0, 253)
+FlickDivider.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+FlickDivider.BorderSizePixel  = 0
+
+local FlickBtnClip = Instance.new("Frame", SettingsPanel)
+FlickBtnClip.Size             = UDim2.new(1, -24, 0, 36)
+FlickBtnClip.Position         = UDim2.new(0, 12, 0, 262)
+FlickBtnClip.BackgroundTransparency = 1
+FlickBtnClip.ClipsDescendants = true
+Instance.new("UICorner", FlickBtnClip).CornerRadius = UDim.new(0, 10)
+
+local FlickBtn = Instance.new("TextButton", FlickBtnClip)
+FlickBtn.Size             = UDim2.new(1, 0, 1, 0)
+FlickBtn.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
+FlickBtn.Text             = ""
+FlickBtn.BorderSizePixel  = 0
+FlickBtn.AutoButtonColor  = false
+Instance.new("UICorner", FlickBtn).CornerRadius = UDim.new(0, 10)
+
+local FlickBtnStroke = Instance.new("UIStroke", FlickBtn)
+FlickBtnStroke.Color        = Color3.fromRGB(80, 60, 130)
+FlickBtnStroke.Thickness    = 1
+FlickBtnStroke.Transparency = 0.3
+
+local FlickBtnPill = Instance.new("Frame", FlickBtn)
+FlickBtnPill.Size             = UDim2.new(0, 7, 0, 7)
+FlickBtnPill.Position         = UDim2.new(0, 12, 0.5, -3)
+FlickBtnPill.BackgroundColor3 = Color3.fromRGB(100, 75, 170)
+FlickBtnPill.BorderSizePixel  = 0
+FlickBtnPill.ZIndex           = 4
+Instance.new("UICorner", FlickBtnPill).CornerRadius = UDim.new(1, 0)
+
+local FlickBtnText = Instance.new("TextLabel", FlickBtn)
+FlickBtnText.Size               = UDim2.new(1, -30, 1, 0)
+FlickBtnText.Position           = UDim2.new(0, 28, 0, 0)
+FlickBtnText.BackgroundTransparency = 1
+FlickBtnText.Text               = "FLICK"
+FlickBtnText.TextColor3         = Color3.fromRGB(160, 140, 210)
+FlickBtnText.TextSize           = 11
+FlickBtnText.Font               = Enum.Font.GothamBold
+FlickBtnText.TextXAlignment     = Enum.TextXAlignment.Left
+FlickBtnText.ZIndex             = 4
+
+local FlickHoldBar = Instance.new("Frame", FlickBtnClip)
+FlickHoldBar.Size             = UDim2.new(0, 0, 0, 2)
+FlickHoldBar.Position         = UDim2.new(0, 0, 1, -2)
+FlickHoldBar.BackgroundColor3 = Color3.fromRGB(140, 100, 255)
+FlickHoldBar.BorderSizePixel  = 0
+FlickHoldBar.ZIndex           = 5
+Instance.new("UICorner", FlickHoldBar).CornerRadius = UDim.new(0, 1)
+
+-- -- Lock Flick Mini row --------------------------------
+local LockFlickDivider = Instance.new("Frame", SettingsPanel)
+LockFlickDivider.Size             = UDim2.new(1, -24, 0, 1)
+LockFlickDivider.Position         = UDim2.new(0, 12, 0, 306)
+LockFlickDivider.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+LockFlickDivider.BorderSizePixel  = 0
+
+local LockFlickRow = Instance.new("Frame", SettingsPanel)
+LockFlickRow.Size               = UDim2.new(1, -24, 0, 34)
+LockFlickRow.Position           = UDim2.new(0, 12, 0, 315)
+LockFlickRow.BackgroundColor3   = Color3.fromRGB(12, 12, 12)
+LockFlickRow.BorderSizePixel    = 0
+Instance.new("UICorner", LockFlickRow).CornerRadius = UDim.new(0, 9)
+local LockFlickRowStroke = Instance.new("UIStroke", LockFlickRow)
+LockFlickRowStroke.Color        = Color3.fromRGB(40, 40, 40)
+LockFlickRowStroke.Thickness    = 1
+LockFlickRowStroke.Transparency = 0.25
+
+local LockFlickLabel = Instance.new("TextLabel", LockFlickRow)
+LockFlickLabel.Size               = UDim2.new(1, -52, 1, 0)
+LockFlickLabel.Position           = UDim2.new(0, 12, 0, 0)
+LockFlickLabel.BackgroundTransparency = 1
+LockFlickLabel.Text               = "Lock Flick Mini"
+LockFlickLabel.TextColor3         = Color3.fromRGB(175, 175, 175)
+LockFlickLabel.TextSize           = 10
+LockFlickLabel.Font               = Enum.Font.GothamBold
+LockFlickLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local LockFlickSubLabel = Instance.new("TextLabel", LockFlickRow)
+LockFlickSubLabel.Size               = UDim2.new(1, -52, 0, 12)
+LockFlickSubLabel.Position           = UDim2.new(0, 12, 1, -13)
+LockFlickSubLabel.BackgroundTransparency = 1
+LockFlickSubLabel.Text               = "Locks the flick mini circle"
+LockFlickSubLabel.TextColor3         = Color3.fromRGB(70, 70, 70)
+LockFlickSubLabel.TextSize           = 8
+LockFlickSubLabel.Font               = Enum.Font.Gotham
+LockFlickSubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local LockFlickToggle = Instance.new("TextButton", LockFlickRow)
+LockFlickToggle.Size             = UDim2.new(0, 36, 0, 18)
+LockFlickToggle.Position         = UDim2.new(1, -44, 0.5, -9)
+LockFlickToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+LockFlickToggle.Text             = ""
+LockFlickToggle.BorderSizePixel  = 0
+LockFlickToggle.AutoButtonColor  = false
+LockFlickToggle.ZIndex           = 6
+Instance.new("UICorner", LockFlickToggle).CornerRadius = UDim.new(1, 0)
+local LockFlickToggleStroke = Instance.new("UIStroke", LockFlickToggle)
+LockFlickToggleStroke.Color        = Color3.fromRGB(60, 60, 60)
+LockFlickToggleStroke.Thickness    = 1
+LockFlickToggleStroke.Transparency = 0.2
+
+local LockFlickThumb = Instance.new("Frame", LockFlickToggle)
+LockFlickThumb.Size             = UDim2.new(0, 12, 0, 12)
+LockFlickThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+LockFlickThumb.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+LockFlickThumb.BorderSizePixel  = 0
+LockFlickThumb.ZIndex           = 7
+Instance.new("UICorner", LockFlickThumb).CornerRadius = UDim.new(1, 0)
+
 -- =====================================================
 --  SHOW / HIDE BUTTON  (right screen edge)
 -- =====================================================
@@ -1576,6 +1665,89 @@ LockIcon.TextSize           = 9
 LockIcon.Font               = Enum.Font.GothamBold
 LockIcon.ZIndex             = 64
 LockIcon.Visible            = false
+
+-- =====================================================
+--  FLICK MINI CIRCLE  (purple, shows "Flick")
+-- =====================================================
+
+local FlickMini = Instance.new("TextButton", SG)
+FlickMini.Name             = "FlickMiniCircle"
+FlickMini.Size             = UDim2.new(0, 56, 0, 56)
+FlickMini.Position         = UDim2.new(0, 28, 0.5, 80)
+FlickMini.AnchorPoint      = Vector2.new(0.5, 0.5)
+FlickMini.BackgroundColor3 = Color3.fromRGB(12, 8, 22)
+FlickMini.Text             = ""
+FlickMini.BorderSizePixel  = 0
+FlickMini.AutoButtonColor  = false
+FlickMini.Visible          = false
+FlickMini.Active           = true
+FlickMini.Draggable        = true
+FlickMini.ZIndex           = 60
+Instance.new("UICorner", FlickMini).CornerRadius = UDim.new(1, 0)
+
+local FlickMiniGlow = Instance.new("UIStroke", FlickMini)
+FlickMiniGlow.Color        = Color3.fromRGB(130, 90, 255)
+FlickMiniGlow.Thickness    = 2
+FlickMiniGlow.Transparency = 0.55
+
+local FlickMiniShadFrame = Instance.new("Frame", SG)
+FlickMiniShadFrame.Size             = UDim2.new(0, 84, 0, 84)
+FlickMiniShadFrame.AnchorPoint      = Vector2.new(0.5, 0.5)
+FlickMiniShadFrame.Position         = UDim2.new(0, 28, 0.5, 85)
+FlickMiniShadFrame.BackgroundTransparency = 1
+FlickMiniShadFrame.ZIndex           = 58
+FlickMiniShadFrame.Visible          = false
+local FlickMiniShad = Instance.new("ImageLabel", FlickMiniShadFrame)
+FlickMiniShad.AnchorPoint           = Vector2.new(0.5, 0.5)
+FlickMiniShad.BackgroundTransparency = 1
+FlickMiniShad.Position              = UDim2.new(0.5, 0, 0.5, 0)
+FlickMiniShad.Size                  = UDim2.new(1, 0, 1, 0)
+FlickMiniShad.ZIndex                = 58
+FlickMiniShad.Image                 = "rbxassetid://6014261993"
+FlickMiniShad.ImageColor3           = Color3.fromRGB(0, 0, 0)
+FlickMiniShad.ImageTransparency     = 0.42
+FlickMiniShad.ScaleType             = Enum.ScaleType.Slice
+FlickMiniShad.SliceCenter           = Rect.new(49, 49, 450, 450)
+
+local FlickMiniInnerRing = Instance.new("Frame", FlickMini)
+FlickMiniInnerRing.Size             = UDim2.new(0, 44, 0, 44)
+FlickMiniInnerRing.Position         = UDim2.new(0.5, -22, 0.5, -22)
+FlickMiniInnerRing.BackgroundTransparency = 1
+FlickMiniInnerRing.ZIndex           = 61
+Instance.new("UICorner", FlickMiniInnerRing).CornerRadius = UDim.new(1, 0)
+local FlickMiniInnerStroke = Instance.new("UIStroke", FlickMiniInnerRing)
+FlickMiniInnerStroke.Color        = Color3.fromRGB(130, 90, 255)
+FlickMiniInnerStroke.Thickness    = 1
+FlickMiniInnerStroke.Transparency = 0.6
+
+local FlickMiniLbl = Instance.new("TextLabel", FlickMini)
+FlickMiniLbl.Size               = UDim2.new(1, 0, 1, 0)
+FlickMiniLbl.Position           = UDim2.new(0, 0, 0, 0)
+FlickMiniLbl.BackgroundTransparency = 1
+FlickMiniLbl.Text               = "Flick"
+FlickMiniLbl.TextColor3         = Color3.fromRGB(140, 110, 220)
+FlickMiniLbl.TextSize           = 10
+FlickMiniLbl.Font               = Enum.Font.GothamBold
+FlickMiniLbl.ZIndex             = 63
+
+local FlickMiniHoldBar = Instance.new("Frame", FlickMini)
+FlickMiniHoldBar.Size             = UDim2.new(0, 0, 0, 2)
+FlickMiniHoldBar.Position         = UDim2.new(0.5, 0, 1, -8)
+FlickMiniHoldBar.AnchorPoint      = Vector2.new(0.5, 0)
+FlickMiniHoldBar.BackgroundColor3 = Color3.fromRGB(130, 90, 255)
+FlickMiniHoldBar.BorderSizePixel  = 0
+FlickMiniHoldBar.ZIndex           = 65
+Instance.new("UICorner", FlickMiniHoldBar).CornerRadius = UDim.new(0, 1)
+
+local FlickLockIcon = Instance.new("TextLabel", FlickMini)
+FlickLockIcon.Size               = UDim2.new(1, 0, 0, 12)
+FlickLockIcon.Position           = UDim2.new(0, 0, 0, 4)
+FlickLockIcon.BackgroundTransparency = 1
+FlickLockIcon.Text               = "[L]"
+FlickLockIcon.TextSize           = 9
+FlickLockIcon.Font               = Enum.Font.GothamBold
+FlickLockIcon.ZIndex             = 64
+FlickLockIcon.Visible            = false
 
 -- =====================================================
 --  ANIMATIONS
@@ -1766,42 +1938,6 @@ BombStudsBox.FocusLost:Connect(function()
 		BombStudsBox.Text = tostring(AUTOBOMB_STUDS)
 		tw(BombStudsBoxStroke, { Color = Color3.fromRGB(200, 60, 60) }, 0.12)
 		task.delay(0.6, function() tw(BombStudsBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
-	end
-end)
-
--- -- Stop delay toggle + textbox handlers -------------
-local function applyStopToggle()
-	if stopDelayOn then
-		tw(StopToggle,      { BackgroundColor3 = Color3.fromRGB(40, 40, 40) }, 0.18)
-		tw(StopThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = Color3.fromRGB(220, 220, 220) }, 0.2, Enum.EasingStyle.Back)
-		tw(StopToggleStroke,{ Color = Color3.fromRGB(230, 230, 230) }, 0.18)
-		tw(StopLabel,       { TextColor3 = Color3.fromRGB(220, 220, 220) }, 0.2)
-		tw(StopRowStroke,   { Color = Color3.fromRGB(60, 60, 60), Transparency = 0.08 }, 0.2)
-	else
-		tw(StopToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 22) }, 0.18)
-		tw(StopThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(100, 100, 100) }, 0.2, Enum.EasingStyle.Back)
-		tw(StopToggleStroke,{ Color = Color3.fromRGB(60, 60, 60) }, 0.18)
-		tw(StopLabel,       { TextColor3 = Color3.fromRGB(175, 175, 175) }, 0.2)
-		tw(StopRowStroke,   { Color = Color3.fromRGB(40, 40, 40), Transparency = 0.25 }, 0.2)
-	end
-end
-
-StopToggle.MouseButton1Click:Connect(function()
-	stopDelayOn = not stopDelayOn
-	applyStopToggle()
-end)
-
-StopBox.FocusLost:Connect(function()
-	local val = tonumber(StopBox.Text)
-	if val then
-		STOP_DELAY = math.clamp(val, 0, 3)
-		StopBox.Text = tostring(STOP_DELAY)
-		tw(StopBoxStroke, { Color = Color3.fromRGB(180, 180, 180) }, 0.12)
-		task.delay(0.6, function() tw(StopBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
-	else
-		StopBox.Text = tostring(STOP_DELAY)
-		tw(StopBoxStroke, { Color = Color3.fromRGB(200, 60, 60) }, 0.12)
-		task.delay(0.6, function() tw(StopBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
 	end
 end)
 
@@ -2266,12 +2402,174 @@ SGToggle.MouseLeave:Connect(function()
 end)
 
 -- =====================================================
+--  FLICK MINI SHOW / HIDE
+-- =====================================================
+
+local function syncFlickMiniShadow()
+	if not flickMiniVisible then return end
+	local ap = FlickMini.AbsolutePosition
+	local as = FlickMini.AbsoluteSize
+	FlickMiniShadFrame.Position = UDim2.new(0, ap.X + as.X / 2, 0, ap.Y + as.Y / 2 + 5)
+end
+
+local function showFlickMini()
+	flickMiniVisible = true
+	FlickMini.Visible          = true
+	FlickMiniShadFrame.Visible = true
+	local absPos = Win.AbsolutePosition
+	FlickMini.Position          = UDim2.new(0, absPos.X + 120, 0.5, 80)
+	FlickMiniShadFrame.Position = UDim2.new(0, absPos.X + 120, 0.5, 85)
+	-- entrance pop
+	FlickMini.Rotation = -25
+	FlickMini.Size     = UDim2.new(0, 4, 0, 4)
+	tw(FlickMini, { Size = UDim2.new(0, 56, 0, 56), Rotation = 0 }, 0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	-- apply lock state
+	FlickMini.Draggable      = not flickMiniLocked
+	FlickLockIcon.Visible    = flickMiniLocked
+end
+
+local function hideFlickMini()
+	flickMiniVisible = false
+	tw(FlickMini, { Size = UDim2.new(0, 0, 0, 0), Rotation = 20 }, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+	task.delay(0.25, function()
+		if not flickMiniVisible then
+			FlickMini.Visible          = false
+			FlickMiniShadFrame.Visible = false
+			FlickMini.Rotation         = 0
+			FlickMini.Size             = UDim2.new(0, 56, 0, 56)
+		end
+	end)
+end
+
+-- =====================================================
+--  FLICK BUTTON HOLD LOGIC
+-- =====================================================
+
+local flickHoldConn  = nil
+local flickHoldFired = false
+
+local function startFlickHoldWatch(bar, onComplete)
+	local startT = tick()
+	return RunService.Heartbeat:Connect(function()
+		local frac = math.min((tick() - startT) / FLICK_HOLD_DURATION, 1)
+		bar.Size = UDim2.new(frac, 0, 0, 2)
+		if frac >= 1 then onComplete() end
+	end)
+end
+
+FlickBtn.MouseButton1Down:Connect(function()
+	if flickHoldConn then flickHoldConn:Disconnect(); flickHoldConn = nil end
+	flickHoldFired = false
+	FlickHoldBar.Size = UDim2.new(0, 0, 0, 2)
+	flickHoldConn = startFlickHoldWatch(FlickHoldBar, function()
+		if flickHoldConn then flickHoldConn:Disconnect(); flickHoldConn = nil end
+		flickHoldFired = true
+		FlickHoldBar.Size = UDim2.new(0, 0, 0, 2)
+		if flickMiniVisible then hideFlickMini() else showFlickMini() end
+	end)
+end)
+
+FlickBtn.MouseButton1Up:Connect(function()
+	if flickHoldConn then
+		flickHoldConn:Disconnect(); flickHoldConn = nil
+		tw(FlickHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.12)
+		if not flickHoldFired then
+			-- Short tap = do the blatant flick
+			tw(FlickBtn, { BackgroundColor3 = Color3.fromRGB(35, 25, 55) }, 0.08)
+			task.delay(0.12, function()
+				tw(FlickBtn, { BackgroundColor3 = Color3.fromRGB(18, 14, 28) }, 0.15)
+			end)
+			blatantFlick()
+		end
+	end
+end)
+
+FlickBtn.MouseEnter:Connect(function()
+	tw(FlickBtn, { BackgroundColor3 = Color3.fromRGB(26, 20, 42) }, 0.12)
+end)
+FlickBtn.MouseLeave:Connect(function()
+	if flickHoldConn then flickHoldConn:Disconnect(); flickHoldConn = nil end
+	tw(FlickHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.1)
+	tw(FlickBtn, { BackgroundColor3 = Color3.fromRGB(18, 14, 28) }, 0.12)
+end)
+
+-- Flick Mini tap = flick, hold = hide
+local flickMiniHoldConn  = nil
+local flickMiniHoldFired = false
+
+FlickMini.MouseButton1Down:Connect(function()
+	if flickMiniHoldConn then flickMiniHoldConn:Disconnect(); flickMiniHoldConn = nil end
+	flickMiniHoldFired = false
+	FlickMiniHoldBar.Size = UDim2.new(0, 0, 0, 2)
+	flickMiniHoldConn = startFlickHoldWatch(FlickMiniHoldBar, function()
+		if flickMiniHoldConn then flickMiniHoldConn:Disconnect(); flickMiniHoldConn = nil end
+		flickMiniHoldFired = true
+		FlickMiniHoldBar.Size = UDim2.new(0, 0, 0, 2)
+		hideFlickMini()
+	end)
+end)
+
+FlickMini.MouseButton1Up:Connect(function()
+	if flickMiniHoldConn then
+		flickMiniHoldConn:Disconnect(); flickMiniHoldConn = nil
+		tw(FlickMiniHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.12)
+		if not flickMiniHoldFired then
+			-- Short tap = flick
+			tw(FlickMini, { BackgroundColor3 = Color3.fromRGB(30, 18, 55) }, 0.08)
+			task.delay(0.12, function()
+				tw(FlickMini, { BackgroundColor3 = Color3.fromRGB(12, 8, 22) }, 0.15)
+			end)
+			blatantFlick()
+		end
+	end
+end)
+
+FlickMini.MouseEnter:Connect(function()
+	tw(FlickMini, { Size = UDim2.new(0, 62, 0, 62) }, 0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+end)
+FlickMini.MouseLeave:Connect(function()
+	if flickMiniHoldConn then flickMiniHoldConn:Disconnect(); flickMiniHoldConn = nil end
+	tw(FlickMiniHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.1)
+	tw(FlickMini, { Size = UDim2.new(0, 56, 0, 56) }, 0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+end)
+
+-- =====================================================
+--  LOCK FLICK MINI
+-- =====================================================
+
+local function applyFlickMiniLock()
+	FlickMini.Draggable      = not flickMiniLocked
+	FlickLockIcon.Visible    = flickMiniLocked
+	if flickMiniLocked then
+		tw(LockFlickToggle,      { BackgroundColor3 = Color3.fromRGB(40, 40, 40) }, 0.18)
+		tw(LockFlickThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = Color3.fromRGB(180, 150, 255) }, 0.2, Enum.EasingStyle.Back)
+		tw(LockFlickToggleStroke,{ Color = Color3.fromRGB(140, 100, 255) }, 0.18)
+	else
+		tw(LockFlickToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 22) }, 0.18)
+		tw(LockFlickThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(100, 100, 100) }, 0.2, Enum.EasingStyle.Back)
+		tw(LockFlickToggleStroke,{ Color = Color3.fromRGB(60, 60, 60) }, 0.18)
+	end
+end
+
+LockFlickToggle.MouseButton1Click:Connect(function()
+	flickMiniLocked = not flickMiniLocked
+	applyFlickMiniLock()
+end)
+LockFlickToggle.MouseEnter:Connect(function()
+	tw(LockFlickRow, { BackgroundColor3 = Color3.fromRGB(20, 20, 20) }, 0.12)
+end)
+LockFlickToggle.MouseLeave:Connect(function()
+	tw(LockFlickRow, { BackgroundColor3 = Color3.fromRGB(12, 12, 12) }, 0.12)
+end)
+
+-- =====================================================
 --  LIVE LOOP
 -- =====================================================
 
 RunService.Heartbeat:Connect(function()
 	if tracking then updateUI() end
 	if miniVisible and not miniLocked then syncMiniShadow() end
+	if flickMiniVisible and not flickMiniLocked then syncFlickMiniShadow() end
 	-- Keep shadow frame glued to the main window (fixes frozen shadow when dragged)
 	if mainVisible then
 		local ap = Win.AbsolutePosition
