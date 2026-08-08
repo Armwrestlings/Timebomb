@@ -1,0 +1,2348 @@
+-- +======================================================+
+-- |            AUTO TRACK  v5                            |
+-- |  Settings . Lock Mini . Line ESP . Polished Anims    |
+-- +======================================================+
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+
+-- -----------------------------------------------------
+--  CONFIG
+-- -----------------------------------------------------
+local REQUIRE_TOOL_EQUIPPED = true
+local JUMP_HEIGHT_THRESHOLD = 3.5
+local JUMP_COOLDOWN         = 0.65
+local MOVETO_REFRESH        = 0.12
+local HOLD_DURATION         = 2.0
+local DOUBLE_JUMP_POWER     = 0.6  -- multiplier of normal JumpPower (0.5 = half height, 1.0 = full height)
+local LINE_ESP_DISTANCE     = 40  -- studs radius for ESP (players within this get lines + outline)
+-- (fixed internally, no longer user-configurable)
+
+-- -----------------------------------------------------
+--  THEME
+-- -----------------------------------------------------
+local ACCENT         = Color3.fromRGB(146, 118, 255)
+local ACCENT_BRIGHT  = Color3.fromRGB(188, 170, 255)
+local ACCENT_DIM     = Color3.fromRGB(78, 64, 132)
+
+local SURFACE        = Color3.fromRGB(13, 13, 17)
+local SURFACE_RAISED = Color3.fromRGB(19, 19, 26)
+local SURFACE_HOVER  = Color3.fromRGB(25, 25, 34)
+
+local BORDER         = Color3.fromRGB(66, 62, 96)
+local TEXT_MAIN      = Color3.fromRGB(230, 230, 242)
+local TEXT_SUB       = Color3.fromRGB(106, 106, 132)
+local TEXT_FAINT     = Color3.fromRGB(72, 72, 94)
+
+-- -----------------------------------------------------
+--  STATE
+-- -----------------------------------------------------
+local tracking      = false
+local trackConn     = nil
+local lastJump      = 0
+local lastMoveTime  = 0
+local currentTarget = nil
+
+local lineEspOn         = false
+local lineEspLines      = {}   -- [player] = { line = Frame }
+local lineEspHighlights = {}   -- [player] = Highlight (character outline)
+local lineEspConn       = nil
+
+local mainVisible  = true
+local miniVisible  = false
+local miniLocked   = false
+local onSettings   = false
+local statusGuiOn  = false
+
+local autoBomb     = false
+local autoBombConn = nil
+local AUTOBOMB_COUNTDOWN = 3
+local AUTOBOMB_STUDS     = 15
+
+local doubleJumpOn    = false  -- Double Jump toggle
+local doubleJumpUsed  = false  -- tracks if air jump already used this flight
+local doubleJumpConn  = nil
+
+-- -----------------------------------------------------
+--  LOGIC HELPERS
+-- -----------------------------------------------------
+
+-- Tag stamped on every Highlight WE create so hasHighlight ignores them
+local ESP_TAG = "__AutoTrackESP__"
+
+-- Returns true only if a FOREIGN highlight exists on the character
+-- (one we didn't create ourselves)
+local function hasHighlight(char)
+	if not char then return false end
+	for _, v in ipairs(char:GetDescendants()) do
+		if v:IsA("Highlight") and not v:GetAttribute(ESP_TAG) then
+			return true
+		end
+	end
+	return false
+end
+
+local function charHasTool(char)
+	if not char then return false end
+	for _, v in ipairs(char:GetChildren()) do
+		if v:IsA("Tool") then return true end
+	end
+	return false
+end
+
+local function localHasTool()
+	local char     = LocalPlayer.Character
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+
+	if char then
+		for _, v in ipairs(char:GetChildren()) do
+			if v:IsA("Tool") then return true end
+		end
+	end
+
+	if REQUIRE_TOOL_EQUIPPED then return false end
+
+	if backpack then
+		for _, v in ipairs(backpack:GetChildren()) do
+			if v:IsA("Tool") then return true end
+		end
+	end
+
+	return false
+end
+
+local function getRoot()
+	local c = LocalPlayer.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHum()
+	local c = LocalPlayer.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getBestTarget()
+	local root = getRoot()
+	if not root then return nil end
+
+	local myArena = getLocalArena()
+
+	-- If not in a game, nothing to track
+	if not myArena then return nil end
+
+	local best, bestDist = nil, math.huge
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p == LocalPlayer then continue end
+
+		local char = p.Character
+		if not char then continue end
+
+		local pRoot = char:FindFirstChild("HumanoidRootPart")
+		local pHum  = char:FindFirstChildOfClass("Humanoid")
+		if not pRoot or not pHum or pHum.Health <= 0 then continue end
+		if hasHighlight(char) then continue end
+		if charHasTool(char)  then continue end
+
+		-- Must share same ActiveArena
+		if getPlayerArena(p) ~= myArena then continue end
+
+		local d = (pRoot.Position - root.Position).Magnitude
+		if d < bestDist then bestDist = d; best = p end
+	end
+
+	return best
+end
+
+-- -----------------------------------------------------
+--  TRACKING LOOP
+-- -----------------------------------------------------
+local function startTracking()
+	if trackConn then return end
+
+	lastJump = 0; lastMoveTime = 0; currentTarget = nil
+
+	trackConn = RunService.Heartbeat:Connect(function()
+		local now = tick()
+		local char = LocalPlayer.Character
+		local hasBomb = char and char:FindFirstChild("Bomb") ~= nil
+
+		-- Yield to auto bomb while we don't have the bomb yet
+		if autoBomb and not hasBomb then return end
+
+		-- Don't have bomb - stand still
+		if not hasBomb then
+			local h, r = getHum(), getRoot()
+			if h and r then h:MoveTo(r.Position) end
+			currentTarget = nil; return
+		end
+
+		-- Arena check - exact same as auto bomb uses
+		local myData = LocalPlayer:FindFirstChild("Data")
+		local myAV   = myData and myData:FindFirstChild("ActiveArena")
+		local myArena = myAV and myAV.Value
+
+		-- "nil" string or actual nil = not in arena
+		if myArena == nil or tostring(myArena) == "nil" or tostring(myArena) == "" then
+			local h, r = getHum(), getRoot()
+			if h and r then h:MoveTo(r.Position) end
+			currentTarget = nil; return
+		end
+
+		-- Find nearest target in same arena, no bomb, no highlight
+		if now - lastMoveTime >= MOVETO_REFRESH then
+			lastMoveTime  = now
+			local root = getRoot()
+
+			local best, bestDist = nil, math.huge
+
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p == LocalPlayer then continue end
+
+				local pChar = p.Character
+				if not pChar then continue end
+
+				local pRoot = pChar:FindFirstChild("HumanoidRootPart")
+				local pHum  = pChar:FindFirstChildOfClass("Humanoid")
+				if not pRoot or not pHum or pHum.Health <= 0 then continue end
+				if hasHighlight(pChar) then continue end
+				if charHasTool(pChar)  then continue end
+
+				-- Same arena - read their value the same way
+				local theirData = p:FindFirstChild("Data")
+				local theirAV   = theirData and theirData:FindFirstChild("ActiveArena")
+				local theirArena = theirAV and theirAV.Value
+				if theirArena ~= myArena then continue end
+
+				local d = (pRoot.Position - root.Position).Magnitude
+				if d < bestDist then bestDist = d; best = p end
+			end
+
+			currentTarget = best
+		end
+
+		if not currentTarget then return end
+
+		local root, hum = getRoot(), getHum()
+		if not root or not hum or hum.Health <= 0 then return end
+
+		local tChar = currentTarget.Character
+		local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+		if not tRoot then currentTarget = nil; return end
+
+		hum:MoveTo(tRoot.Position)
+
+		local dy = tRoot.Position.Y - root.Position.Y
+		if dy > JUMP_HEIGHT_THRESHOLD and now - lastJump >= JUMP_COOLDOWN then
+			lastJump = now; hum.Jump = true
+		end
+	end)
+end
+
+local function stopTracking()
+	if trackConn then trackConn:Disconnect(); trackConn = nil end
+	currentTarget = nil
+
+	local h, r = getHum(), getRoot()
+	if h and r then h:MoveTo(r.Position) end
+end
+
+-- -----------------------------------------------------
+--  AUTO GET BOMB LOGIC
+-- -----------------------------------------------------
+
+-- Reads the countdown from the exact known path:
+-- Bomb.BombHandle.UIAttachment.UI.TimeLeft (TextLabel)
+local function findCountdownNumber(char)
+	local bomb = char:FindFirstChild("Bomb")
+	if not bomb then return nil, nil end
+
+	local handle = bomb:FindFirstChild("BombHandle")
+	if not handle then return nil, nil end
+
+	local attachment = handle:FindFirstChild("UIAttachment")
+	if not attachment then return nil, nil end
+
+	local ui = attachment:FindFirstChild("UI")
+	if not ui then return nil, nil end
+
+	local label = ui:FindFirstChild("TimeLeft")
+	if not label or not label:IsA("TextLabel") then return nil, nil end
+
+	local txt = label.Text
+	if not txt or txt == "" then return nil, nil end
+
+	local n = tonumber(txt:match("(%d+%.?%d*)"))
+	return n, txt
+end
+
+-- Arena helpers
+-- Reads Player.Data.ActiveArena.Value regardless of ValueBase type.
+-- Returns nil when the player is NOT in an arena (value is nil or "nil").
+-- Returns the raw value when in an arena - we store it as-is so that
+-- comparing two players' arena values works correctly for any type
+-- (same Instance reference, same number, same string, etc.)
+local function getArenaValue(player)
+	local data = player:FindFirstChild("Data")
+	if not data then return nil end
+
+	local av = data:FindFirstChild("ActiveArena")
+	if not av then return nil end
+
+	local raw = av.Value
+
+	-- nil raw value = not in arena
+	if raw == nil then return nil end
+
+	-- If it's a string type, check for literal "nil" or empty
+	local s = tostring(raw)
+	if s == "nil" or s == "" then return nil end
+
+	-- Return the raw value itself - Instance == Instance comparison works,
+	-- string == string works, number == number works
+	return raw
+end
+
+local function getLocalArena()
+	return getArenaValue(LocalPlayer)
+end
+
+local function getPlayerArena(player)
+	return getArenaValue(player)
+end
+
+local autoBombStatusVal  -- forward declared, assigned after GUI
+
+local function startAutoBomb()
+	if autoBombConn then return end
+
+	autoBombConn = RunService.Heartbeat:Connect(function()
+		local root, hum = getRoot(), getHum()
+		if not root or not hum or hum.Health <= 0 then return end
+
+		-- Arena check
+		local myArena = getLocalArena()
+		if not myArena then
+			if autoBombStatusVal then
+				autoBombStatusVal.Text       = "NO ARENA"
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(90, 90, 90)
+			end
+			hum:MoveTo(root.Position)
+			return
+		end
+
+		-- Already holding bomb - let Auto Track take over, just update status
+		if localHasTool() then
+			if autoBombStatusVal then
+				autoBombStatusVal.Text       = "HOLDING BOMB"
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(200, 200, 200)
+			end
+			return
+		end
+
+		-- Find nearest player who has a Bomb tool equipped, same arena, within studs range
+		local bestCarrier, bestChar, bestDist = nil, nil, math.huge
+
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p == LocalPlayer then continue end
+
+			local char = p.Character
+			if not char then continue end
+
+			local pRoot = char:FindFirstChild("HumanoidRootPart")
+			local pHum  = char:FindFirstChildOfClass("Humanoid")
+			if not pRoot or not pHum or pHum.Health <= 0 then continue end
+
+			-- Must share same ActiveArena
+			local theirArena = getPlayerArena(p)
+			if theirArena ~= myArena then continue end
+
+			-- Must have "Bomb" tool equipped in their character
+			local bombTool = char:FindFirstChild("Bomb")
+			if not bombTool or not bombTool:IsA("Tool") then continue end
+
+			local dist = (pRoot.Position - root.Position).Magnitude
+
+			-- Must be within configured studs range
+			if dist > AUTOBOMB_STUDS then continue end
+
+			if dist < bestDist then
+				bestDist = dist; bestCarrier = p; bestChar = char
+			end
+		end
+
+		if not bestCarrier then
+			if autoBombStatusVal then
+				autoBombStatusVal.Text       = "NO BOMB"
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(90, 90, 90)
+			end
+			hum:MoveTo(root.Position)
+			return
+		end
+
+		local carrierRoot = bestChar:FindFirstChild("HumanoidRootPart")
+		if not carrierRoot then return end
+
+		-- Read countdown on the bomb carrier
+		local countNum, countTxt = findCountdownNumber(bestChar)
+
+		-- Never grab at 1 sec or below - too dangerous, player will die
+		local tooLate = countNum ~= nil and countNum <= 1
+
+		local shouldGo = not tooLate and ((countNum == nil) or (countNum <= AUTOBOMB_COUNTDOWN))
+
+		if shouldGo then
+			hum:MoveTo(carrierRoot.Position)
+
+			if autoBombStatusVal then
+				local label = countTxt and ("GRABBING " .. countTxt) or "GRABBING"
+				autoBombStatusVal.Text       = label .. "  [" .. math.floor(bestDist) .. "st]"
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(180, 180, 180)
+			end
+
+		elseif tooLate then
+			hum:MoveTo(root.Position)
+
+			if autoBombStatusVal then
+				autoBombStatusVal.Text       = "TOO LATE  " .. (countTxt or "1")
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(200, 80, 80)
+			end
+
+		else
+			-- Countdown not low enough yet - wait in place
+			hum:MoveTo(root.Position)
+
+			if autoBombStatusVal then
+				autoBombStatusVal.Text       = "WAITING  " .. (countTxt or "")
+				autoBombStatusVal.TextColor3 = Color3.fromRGB(160, 160, 160)
+			end
+		end
+	end)
+end
+
+local function stopAutoBomb()
+	if autoBombConn then autoBombConn:Disconnect(); autoBombConn = nil end
+
+	local h, r = getHum(), getRoot()
+	if h and r then h:MoveTo(r.Position) end
+
+	if autoBombStatusVal then
+		autoBombStatusVal.Text       = "-"
+		autoBombStatusVal.TextColor3 = Color3.fromRGB(180, 180, 180)
+	end
+end
+
+-- =====================================================
+--  DOUBLE JUMP  (one extra jump while airborne)
+-- =====================================================
+local doubleJumpInputConn = nil
+
+local function stopDoubleJump()
+	if doubleJumpConn then doubleJumpConn:Disconnect(); doubleJumpConn = nil end
+	if doubleJumpInputConn then doubleJumpInputConn:Disconnect(); doubleJumpInputConn = nil end
+	doubleJumpUsed = false
+end
+
+local function startDoubleJump()
+	if doubleJumpConn then return end
+
+	doubleJumpUsed = false
+
+	-- Track when the player last touched the ground so we don't
+	-- accidentally fire the double jump on the same frame as the normal jump
+	local landedAt = tick()
+
+	doubleJumpConn = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if not hum then return end
+
+		local state = hum:GetState()
+		if state == Enum.HumanoidStateType.Landed
+			or state == Enum.HumanoidStateType.Running
+			or state == Enum.HumanoidStateType.RunningNoPhysics
+			or state == Enum.HumanoidStateType.Seated then
+			doubleJumpUsed = false
+			landedAt = tick()
+		end
+	end)
+
+	-- JumpRequest fires on mobile jump button AND keyboard space
+	doubleJumpInputConn = game:GetService("UserInputService").JumpRequest:Connect(function()
+		if not doubleJumpOn then return end
+
+		-- Must be at least 0.2s after last landing so normal jump doesn't eat the charge
+		if tick() - landedAt < 0.2 then return end
+
+		local hum = getHum()
+		local root = getRoot()
+		if not hum or not root then return end
+
+		-- Strictly only fire while actually airborne
+		local state = hum:GetState()
+		local airborne = state == Enum.HumanoidStateType.Freefall
+			or state == Enum.HumanoidStateType.Jumping
+
+		if airborne and not doubleJumpUsed then
+			doubleJumpUsed = true
+			local vel = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(vel.X, hum.JumpPower * DOUBLE_JUMP_POWER, vel.Z)
+		end
+	end)
+end
+
+-- =====================================================
+--  TWEEN HELPER
+-- =====================================================
+local function tw(obj, props, t, style, dir)
+	if not obj then return end
+	pcall(function()
+		TweenService:Create(
+			obj,
+			TweenInfo.new(t or 0.2, style or Enum.EasingStyle.Quart, dir or Enum.EasingDirection.Out),
+			props
+		):Play()
+	end)
+end
+
+-- =====================================================
+--  SCREENGUI
+-- =====================================================
+local SG = Instance.new("ScreenGui")
+SG.Name           = "AutoTrackGui"
+SG.ResetOnSpawn   = false
+SG.DisplayOrder   = 999
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.Parent         = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Line ESP container (full screen, behind everything)
+local LineContainer = Instance.new("Frame", SG)
+LineContainer.Name                   = "LineEspContainer"
+LineContainer.Size                   = UDim2.new(1, 0, 1, 0)
+LineContainer.BackgroundTransparency = 1
+LineContainer.ZIndex                 = 1
+
+-- -----------------------------------------------------
+--  LINE ESP LOGIC  (declared here, uses LineContainer)
+-- -----------------------------------------------------
+local Camera = workspace.CurrentCamera
+
+local ESP_FILL_COLOR    = Color3.fromRGB(235, 232, 255)
+local ESP_OUTLINE_COLOR = Color3.fromRGB(168, 140, 255)
+
+-- -- Safe cleanup for one player -----------------------
+local function removeEspForPlayer(p)
+	local entry = lineEspLines[p]
+	if entry and entry.line and entry.line.Parent then
+		entry.line:Destroy()
+	end
+	lineEspLines[p] = nil
+
+	local hl = lineEspHighlights[p]
+	if hl and hl.Parent then hl:Destroy() end
+	lineEspHighlights[p] = nil
+end
+
+local function clearAllEsp()
+	-- collect keys first so we don't mutate while iterating
+	local keys = {}
+	for p in pairs(lineEspLines) do keys[#keys+1] = p end
+	for _, p in ipairs(keys) do removeEspForPlayer(p) end
+
+	-- catch any orphan highlights
+	local hkeys = {}
+	for p in pairs(lineEspHighlights) do hkeys[#hkeys+1] = p end
+	for _, p in ipairs(hkeys) do
+		local hl = lineEspHighlights[p]
+		if hl and hl.Parent then hl:Destroy() end
+		lineEspHighlights[p] = nil
+	end
+end
+
+local function stopLineEsp()
+	if lineEspConn then lineEspConn:Disconnect(); lineEspConn = nil end
+	clearAllEsp()
+end
+
+local function startLineEsp()
+	if lineEspConn then return end
+
+	lineEspConn = RunService.RenderStepped:Connect(function()
+		local myRoot = getRoot()
+		if not myRoot then return end
+
+		-- Use UpperTorso (R15) or Torso (R6) for the local player origin.
+		-- HumanoidRootPart sits at foot level so we grab the actual torso part.
+		local myChar   = LocalPlayer.Character
+		local myTorso  = myChar and (
+			myChar:FindFirstChild("UpperTorso") or  -- R15
+			myChar:FindFirstChild("Torso")          -- R6
+		)
+		local myOriginPart = myTorso or myRoot  -- fallback to HRP if neither found
+
+		-- Project LocalPlayer's torso to screen
+		local myScreenRaw, myOnScreen = Camera:WorldToViewportPoint(myOriginPart.Position)
+		local vp = Camera.ViewportSize
+
+		local originScreen
+		if myOnScreen and myScreenRaw.Z > 0 then
+			originScreen = Vector2.new(myScreenRaw.X, myScreenRaw.Y)
+		else
+			originScreen = Vector2.new(vp.X / 2, vp.Y / 2)
+		end
+
+		-- -- Build valid target set (world-space 15 stud radius) ---
+		local validPlayers = {}
+
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p == LocalPlayer then continue end
+
+			local char = p.Character
+			if not char then continue end
+
+			local pRoot = char:FindFirstChild("HumanoidRootPart")
+			local pHum  = char:FindFirstChildOfClass("Humanoid")
+			if not pRoot or not pHum or pHum.Health <= 0 then continue end
+			if hasHighlight(char) then continue end
+
+			-- Distance check uses HRP (most reliable, always exists)
+			local dist = (pRoot.Position - myRoot.Position).Magnitude
+			if dist > LINE_ESP_DISTANCE then continue end
+
+			-- Grab their torso for the line endpoint (R15 -> UpperTorso, R6 -> Torso)
+			local pTorso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or pRoot
+
+			validPlayers[p] = { root = pRoot, torso = pTorso, char = char, dist = dist }
+		end
+
+		-- -- Remove stale entries (collect keys first to avoid mutation) --
+		local stale = {}
+		for p in pairs(lineEspLines) do
+			if not validPlayers[p] then stale[#stale+1] = p end
+		end
+		for _, p in ipairs(stale) do removeEspForPlayer(p) end
+
+		local staleH = {}
+		for p in pairs(lineEspHighlights) do
+			if not validPlayers[p] then staleH[#staleH+1] = p end
+		end
+		for _, p in ipairs(staleH) do
+			local hl = lineEspHighlights[p]
+			if hl and hl.Parent then hl:Destroy() end
+			lineEspHighlights[p] = nil
+		end
+
+		-- -- Create / update per-player ESP -----------------------
+		for p, info in pairs(validPlayers) do
+
+			-- Character Highlight outline - created once per player
+			-- Tagged with ESP_TAG so hasHighlight ignores it (FLICKER FIX)
+			if not lineEspHighlights[p] or not lineEspHighlights[p].Parent then
+				local hl = Instance.new("Highlight")
+				hl:SetAttribute(ESP_TAG, true)   -- mark as ours
+				hl.FillColor           = ESP_FILL_COLOR
+				hl.OutlineColor        = ESP_OUTLINE_COLOR
+				hl.FillTransparency    = 0.78
+				hl.OutlineTransparency = 0.04
+				hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+				hl.Adornee             = info.char
+				hl.Parent              = info.char
+				lineEspHighlights[p]   = hl
+			end
+
+			-- Tracer line - created once, updated every frame
+			if not lineEspLines[p] then
+				local line = Instance.new("Frame")
+				line.BackgroundColor3 = ESP_FILL_COLOR
+				line.BorderSizePixel  = 0
+				line.AnchorPoint      = Vector2.new(0.5, 0.5)
+				line.ZIndex           = 200
+				Instance.new("UICorner", line).CornerRadius = UDim.new(1, 0)
+				line.Parent      = SG
+				lineEspLines[p]  = { line = line }
+			end
+
+			local line = lineEspLines[p].line
+
+			-- Project target TORSO to screen (not HRP/feet)
+			local tScreenRaw, tOnScreen = Camera:WorldToViewportPoint(info.torso.Position)
+			if not tOnScreen or tScreenRaw.Z < 0 then
+				line.Visible = false
+				continue
+			end
+
+			local targetScreen = Vector2.new(tScreenRaw.X, tScreenRaw.Y)
+			line.Visible = true
+
+			-- Line from originScreen -> targetScreen
+			-- Position the frame at the midpoint, AnchorPoint(0.5,0.5) pivots there
+			local dx  = targetScreen.X - originScreen.X
+			local dy  = targetScreen.Y - originScreen.Y
+			local len = math.sqrt(dx * dx + dy * dy)
+			local ang = math.atan2(dy, dx) * (180 / math.pi) + 90
+
+			local midX = (originScreen.X + targetScreen.X) * 0.5
+			local midY = (originScreen.Y + targetScreen.Y) * 0.5
+
+			line.Size     = UDim2.new(0, 2, 0, len)
+			line.Position = UDim2.new(0, midX, 0, midY)
+			line.Rotation = ang
+
+			-- Red when close -> orange at edge of range
+			local t = math.clamp(info.dist / LINE_ESP_DISTANCE, 0, 1)
+			line.BackgroundColor3 = Color3.fromRGB(255, math.floor(55 + t * 145), 55)
+		end
+	end)
+end
+
+-- =====================================================
+--  MAIN WINDOW
+--  ClipsDescendants = false on Win itself.
+--  WinClip (child frame) does the clipping so inner
+--  content stays inside the rounded rect, but the
+--  UIStroke / shadow sit outside fine.
+-- =====================================================
+local WIN_H = 300  -- main panel height
+
+local Win = Instance.new("Frame", SG)
+Win.Name             = "Window"
+Win.Size             = UDim2.new(0, 240, 0, WIN_H)
+Win.Position         = UDim2.new(0, 28, 0.5, -(WIN_H / 2))
+Win.BackgroundColor3 = SURFACE
+Win.BorderSizePixel  = 0
+Win.Active           = true
+Win.Draggable        = true
+Win.ClipsDescendants = false   -- OFF; WinClip handles clipping
+Instance.new("UICorner", Win).CornerRadius = UDim.new(0, 18)
+
+local WinGrad = Instance.new("UIGradient", Win)
+WinGrad.Rotation = 90
+WinGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 8, 11))
+})
+
+-- Inner clip mask - everything visible lives inside here
+local WinClip = Instance.new("Frame", Win)
+WinClip.Size                   = UDim2.new(1, 0, 1, 0)
+WinClip.BackgroundTransparency = 1
+WinClip.ClipsDescendants       = true
+WinClip.ZIndex                 = 1
+Instance.new("UICorner", WinClip).CornerRadius = UDim.new(0, 18)
+
+-- Shadow (child of SG so it's truly outside the clip)
+local ShadFrame = Instance.new("Frame", SG)
+ShadFrame.Size             = UDim2.new(0, 276, 0, WIN_H + 36)
+ShadFrame.Position         = UDim2.new(0, 10, 0.5, -((WIN_H / 2) + 18))
+ShadFrame.BackgroundTransparency = 1
+ShadFrame.ZIndex           = 0
+
+local Shad = Instance.new("ImageLabel", ShadFrame)
+Shad.AnchorPoint           = Vector2.new(0.5, 0.5)
+Shad.BackgroundTransparency = 1
+Shad.Position              = UDim2.new(0.5, 0, 0.5, 0)
+Shad.Size                  = UDim2.new(1, 0, 1, 0)
+Shad.ZIndex                = 0
+Shad.Image                 = "rbxassetid://6014261993"
+Shad.ImageColor3           = Color3.fromRGB(0, 0, 0)
+Shad.ImageTransparency     = 0.24
+Shad.ScaleType             = Enum.ScaleType.Slice
+Shad.SliceCenter           = Rect.new(49, 49, 450, 450)
+
+-- Border stroke on Win (renders outside WinClip, which is correct)
+local WinStroke = Instance.new("UIStroke", Win)
+WinStroke.Color           = BORDER
+WinStroke.Thickness       = 1.6
+WinStroke.Transparency    = 0.38
+WinStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+-- Top accent bar (inside WinClip)
+local TopAccent = Instance.new("Frame", WinClip)
+TopAccent.Size             = UDim2.new(0.52, 0, 0, 2)
+TopAccent.Position         = UDim2.new(0.24, 0, 0, 0)
+TopAccent.BackgroundColor3 = ACCENT
+TopAccent.BorderSizePixel  = 0
+TopAccent.ZIndex           = 10
+Instance.new("UICorner", TopAccent).CornerRadius = UDim.new(0, 2)
+
+local TopAccentGrad = Instance.new("UIGradient", TopAccent)
+TopAccentGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, ACCENT_DIM),
+	ColorSequenceKeypoint.new(0.5, ACCENT_BRIGHT),
+	ColorSequenceKeypoint.new(1, ACCENT_DIM)
+})
+
+-- -- Header --------------------------------------------
+local Hdr = Instance.new("Frame", WinClip)
+Hdr.Size             = UDim2.new(1, 0, 0, 44)
+Hdr.BackgroundColor3 = Color3.fromRGB(14, 14, 19)
+Hdr.BorderSizePixel  = 0
+Hdr.ZIndex           = 2
+
+local HdrGrad = Instance.new("UIGradient", Hdr)
+HdrGrad.Rotation = 90
+HdrGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 20, 27)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(11, 11, 15))
+})
+
+-- Header separator
+local HdrLine = Instance.new("Frame", WinClip)
+HdrLine.Size             = UDim2.new(1, 0, 0, 1)
+HdrLine.Position         = UDim2.new(0, 0, 0, 44)
+HdrLine.BackgroundColor3 = Color3.fromRGB(38, 36, 54)
+HdrLine.BorderSizePixel  = 0
+HdrLine.ZIndex           = 3
+
+-- Pulse dot
+local PulseDot = Instance.new("Frame", Hdr)
+PulseDot.Size             = UDim2.new(0, 7, 0, 7)
+PulseDot.Position         = UDim2.new(0, 14, 0.5, -3)
+PulseDot.BackgroundColor3 = ACCENT_DIM
+PulseDot.BorderSizePixel  = 0
+PulseDot.ZIndex           = 5
+Instance.new("UICorner", PulseDot).CornerRadius = UDim.new(1, 0)
+
+local PulseRing = Instance.new("Frame", Hdr)
+PulseRing.Size             = UDim2.new(0, 7, 0, 7)
+PulseRing.Position         = UDim2.new(0, 14, 0.5, -3)
+PulseRing.BackgroundTransparency = 1
+PulseRing.ZIndex           = 4
+Instance.new("UICorner", PulseRing).CornerRadius = UDim.new(1, 0)
+
+local PulseStroke = Instance.new("UIStroke", PulseRing)
+PulseStroke.Color        = ACCENT_BRIGHT
+PulseStroke.Thickness    = 1.5
+PulseStroke.Transparency = 1
+
+-- Title
+local TitleLbl = Instance.new("TextLabel", Hdr)
+TitleLbl.Size               = UDim2.new(1, -90, 1, 0)
+TitleLbl.Position           = UDim2.new(0, 30, 0, 0)
+TitleLbl.BackgroundTransparency = 1
+TitleLbl.Text               = "AUTO TRACK"
+TitleLbl.TextColor3         = TEXT_MAIN
+TitleLbl.TextSize           = 13
+TitleLbl.Font               = Enum.Font.GothamBlack
+TitleLbl.TextXAlignment     = Enum.TextXAlignment.Left
+TitleLbl.ZIndex             = 5
+
+-- Version badge
+local Ver = Instance.new("TextLabel", Hdr)
+Ver.Size                  = UDim2.new(0, 26, 0, 14)
+Ver.Position              = UDim2.new(1, -34, 0.5, -7)
+Ver.BackgroundColor3      = ACCENT_DIM
+Ver.BackgroundTransparency = 0.32
+Ver.Text                  = "v5"
+Ver.TextColor3            = Color3.fromRGB(228, 224, 255)
+Ver.TextSize              = 9
+Ver.Font                  = Enum.Font.GothamBold
+Ver.ZIndex                = 5
+Instance.new("UICorner", Ver).CornerRadius = UDim.new(0, 5)
+
+-- Settings button
+local SettingsBtn = Instance.new("TextButton", Hdr)
+SettingsBtn.Size             = UDim2.new(0, 52, 0, 22)
+SettingsBtn.Position         = UDim2.new(1, -96, 0.5, -11)
+SettingsBtn.BackgroundColor3 = SURFACE_RAISED
+SettingsBtn.Text             = "Settings"
+SettingsBtn.TextColor3       = Color3.fromRGB(150, 150, 175)
+SettingsBtn.TextSize         = 9
+SettingsBtn.Font             = Enum.Font.GothamBold
+SettingsBtn.BorderSizePixel  = 0
+SettingsBtn.AutoButtonColor  = false
+SettingsBtn.ZIndex           = 6
+Instance.new("UICorner", SettingsBtn).CornerRadius = UDim.new(0, 8)
+
+local SettingsBtnStroke = Instance.new("UIStroke", SettingsBtn)
+SettingsBtnStroke.Color        = BORDER
+SettingsBtnStroke.Thickness    = 1
+SettingsBtnStroke.Transparency = 0.32
+
+-- =====================================================
+--  TAB CONTAINER  (inside WinClip so it clips to window)
+-- =====================================================
+local TabContainer = Instance.new("Frame", WinClip)
+TabContainer.Size             = UDim2.new(2, 0, 1, -45)
+TabContainer.Position         = UDim2.new(0, 0, 0, 45)
+TabContainer.BackgroundTransparency = 1
+
+-- -- MAIN PANEL ---------------------------------------
+local MainPanel = Instance.new("Frame", TabContainer)
+MainPanel.Size             = UDim2.new(0, 240, 1, 0)
+MainPanel.Position         = UDim2.new(0, 0, 0, 0)
+MainPanel.BackgroundTransparency = 1
+
+local function makeRow(parent, labelTxt, yOff)
+	local row = Instance.new("Frame", parent)
+	row.Size               = UDim2.new(1, -24, 0, 15)
+	row.Position           = UDim2.new(0, 12, 0, yOff)
+	row.BackgroundTransparency = 1
+
+	local k = Instance.new("TextLabel", row)
+	k.Size               = UDim2.new(0, 60, 1, 0)
+	k.BackgroundTransparency = 1
+	k.Text               = labelTxt
+	k.TextColor3         = TEXT_SUB
+	k.TextSize           = 9
+	k.Font               = Enum.Font.GothamBold
+	k.TextXAlignment     = Enum.TextXAlignment.Left
+
+	local v = Instance.new("TextLabel", row)
+	v.Size               = UDim2.new(1, -64, 1, 0)
+	v.Position           = UDim2.new(0, 64, 0, 0)
+	v.BackgroundTransparency = 1
+	v.Text               = "-"
+	v.TextColor3         = TEXT_MAIN
+	v.TextSize           = 9
+	v.Font               = Enum.Font.GothamBold
+	v.TextXAlignment     = Enum.TextXAlignment.Left
+
+	return v
+end
+
+local TargetVal = makeRow(MainPanel, "TARGET", 8)
+local StatusVal = makeRow(MainPanel, "STATUS", 24)
+
+local Div = Instance.new("Frame", MainPanel)
+Div.Size             = UDim2.new(1, -24, 0, 1)
+Div.Position         = UDim2.new(0, 12, 0, 44)
+Div.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+Div.BorderSizePixel  = 0
+
+-- -- AUTO TRACK Button --------------------------------
+-- BtnClip: clips the shimmer so it can't bleed outside
+local BtnClip = Instance.new("Frame", MainPanel)
+BtnClip.Size             = UDim2.new(1, -24, 0, 36)
+BtnClip.Position         = UDim2.new(0, 12, 0, 52)
+BtnClip.BackgroundTransparency = 1
+BtnClip.ClipsDescendants = true
+Instance.new("UICorner", BtnClip).CornerRadius = UDim.new(0, 12)
+
+local Btn = Instance.new("TextButton", BtnClip)
+Btn.Size             = UDim2.new(1, 0, 1, 0)
+Btn.BackgroundColor3 = SURFACE_RAISED
+Btn.Text             = ""
+Btn.BorderSizePixel  = 0
+Btn.AutoButtonColor  = false
+Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 12)
+
+local BtnStroke = Instance.new("UIStroke", Btn)
+BtnStroke.Color        = BORDER
+BtnStroke.Thickness    = 1
+BtnStroke.Transparency = 0.22
+
+-- Shimmer lives INSIDE BtnClip - cannot escape
+local BtnShimmer = Instance.new("Frame", BtnClip)
+BtnShimmer.Size             = UDim2.new(0, 90, 1, 0)
+BtnShimmer.Position         = UDim2.new(-0.75, 0, 0, 0)
+BtnShimmer.BackgroundColor3 = ACCENT_BRIGHT
+BtnShimmer.BackgroundTransparency = 0.90
+BtnShimmer.BorderSizePixel  = 0
+BtnShimmer.ZIndex           = 3
+Instance.new("UICorner", BtnShimmer).CornerRadius = UDim.new(0, 12)
+
+local BtnPill = Instance.new("Frame", Btn)
+BtnPill.Size             = UDim2.new(0, 7, 0, 7)
+BtnPill.Position         = UDim2.new(0, 12, 0.5, -3)
+BtnPill.BackgroundColor3 = Color3.fromRGB(98, 88, 150)
+BtnPill.BorderSizePixel  = 0
+BtnPill.ZIndex           = 4
+Instance.new("UICorner", BtnPill).CornerRadius = UDim.new(1, 0)
+
+local BtnText = Instance.new("TextLabel", Btn)
+BtnText.Size               = UDim2.new(1, -30, 1, 0)
+BtnText.Position           = UDim2.new(0, 28, 0, 0)
+BtnText.BackgroundTransparency = 1
+BtnText.Text               = "ENABLE"
+BtnText.TextColor3         = Color3.fromRGB(172, 172, 196)
+BtnText.TextSize           = 11
+BtnText.Font               = Enum.Font.GothamBold
+BtnText.TextXAlignment     = Enum.TextXAlignment.Left
+BtnText.ZIndex             = 4
+
+-- Hold bar inside BtnClip
+local HoldBar = Instance.new("Frame", BtnClip)
+HoldBar.Size             = UDim2.new(0, 0, 0, 2)
+HoldBar.Position         = UDim2.new(0, 0, 1, -2)
+HoldBar.BackgroundColor3 = ACCENT_BRIGHT
+HoldBar.BorderSizePixel  = 0
+HoldBar.ZIndex           = 5
+Instance.new("UICorner", HoldBar).CornerRadius = UDim.new(0, 1)
+
+-- Divider between toggles
+local Div2 = Instance.new("Frame", MainPanel)
+Div2.Size             = UDim2.new(1, -24, 0, 1)
+Div2.Position         = UDim2.new(0, 12, 0, 97)
+Div2.BackgroundColor3 = Color3.fromRGB(42, 40, 60)
+Div2.BorderSizePixel  = 0
+
+-- -- AUTO GET BOMB Card (main panel) -----------------
+local BombCard = Instance.new("Frame", MainPanel)
+BombCard.Size             = UDim2.new(1, -24, 0, 80)
+BombCard.Position         = UDim2.new(0, 12, 0, 106)
+BombCard.BackgroundColor3 = SURFACE
+BombCard.BorderSizePixel  = 0
+Instance.new("UICorner", BombCard).CornerRadius = UDim.new(0, 12)
+
+local BombCardStroke = Instance.new("UIStroke", BombCard)
+BombCardStroke.Color        = BORDER
+BombCardStroke.Thickness    = 1
+BombCardStroke.Transparency = 0.22
+
+-- Pill dot
+local BombDot = Instance.new("Frame", BombCard)
+BombDot.Size             = UDim2.new(0, 6, 0, 6)
+BombDot.Position         = UDim2.new(0, 12, 0, 10)
+BombDot.BackgroundColor3 = ACCENT_DIM
+BombDot.BorderSizePixel  = 0
+BombDot.ZIndex           = 4
+Instance.new("UICorner", BombDot).CornerRadius = UDim.new(1, 0)
+
+-- Label + toggle
+local BombLabel = Instance.new("TextLabel", BombCard)
+BombLabel.Size               = UDim2.new(1, -58, 0, 16)
+BombLabel.Position           = UDim2.new(0, 26, 0, 4)
+BombLabel.BackgroundTransparency = 1
+BombLabel.Text               = "Auto Get Bomb"
+BombLabel.TextColor3         = Color3.fromRGB(205, 205, 222)
+BombLabel.TextSize           = 10
+BombLabel.Font               = Enum.Font.GothamBold
+BombLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local BombToggle = Instance.new("TextButton", BombCard)
+BombToggle.Size             = UDim2.new(0, 36, 0, 18)
+BombToggle.Position         = UDim2.new(1, -44, 0, 4)
+BombToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+BombToggle.Text             = ""
+BombToggle.BorderSizePixel  = 0
+BombToggle.AutoButtonColor  = false
+BombToggle.ZIndex           = 6
+Instance.new("UICorner", BombToggle).CornerRadius = UDim.new(1, 0)
+
+local BombToggleStroke = Instance.new("UIStroke", BombToggle)
+BombToggleStroke.Color        = BORDER
+BombToggleStroke.Thickness    = 1
+BombToggleStroke.Transparency = 0.18
+
+local BombThumb = Instance.new("Frame", BombToggle)
+BombThumb.Size             = UDim2.new(0, 12, 0, 12)
+BombThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+BombThumb.BackgroundColor3 = Color3.fromRGB(112, 112, 132)
+BombThumb.BorderSizePixel  = 0
+BombThumb.ZIndex           = 7
+Instance.new("UICorner", BombThumb).CornerRadius = UDim.new(1, 0)
+
+-- Divider line inside card
+local BombCardDiv = Instance.new("Frame", BombCard)
+BombCardDiv.Size             = UDim2.new(1, -24, 0, 1)
+BombCardDiv.Position         = UDim2.new(0, 12, 0, 26)
+BombCardDiv.BackgroundColor3 = Color3.fromRGB(38, 36, 56)
+BombCardDiv.BorderSizePixel  = 0
+
+-- Countdown row
+local BombSubLabel = Instance.new("TextLabel", BombCard)
+BombSubLabel.Size               = UDim2.new(0.52, 0, 0, 11)
+BombSubLabel.Position           = UDim2.new(0, 12, 0, 32)
+BombSubLabel.BackgroundTransparency = 1
+BombSubLabel.Text               = "Grab when countdown <="
+BombSubLabel.TextColor3         = TEXT_SUB
+BombSubLabel.TextSize           = 8
+BombSubLabel.Font               = Enum.Font.Gotham
+BombSubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local BombCountBox = Instance.new("TextBox", BombCard)
+BombCountBox.Size               = UDim2.new(0, 36, 0, 19)
+BombCountBox.Position           = UDim2.new(1, -84, 0, 29)
+BombCountBox.BackgroundColor3   = Color3.fromRGB(18, 18, 25)
+BombCountBox.Text               = "3"
+BombCountBox.TextColor3         = Color3.fromRGB(224, 224, 238)
+BombCountBox.TextSize           = 11
+BombCountBox.Font               = Enum.Font.GothamBold
+BombCountBox.ClearTextOnFocus   = false
+BombCountBox.PlaceholderText    = "3"
+BombCountBox.PlaceholderColor3  = TEXT_FAINT
+BombCountBox.BorderSizePixel    = 0
+BombCountBox.ZIndex             = 6
+BombCountBox.TextXAlignment     = Enum.TextXAlignment.Center
+Instance.new("UICorner", BombCountBox).CornerRadius = UDim.new(0, 6)
+
+local BombCountBoxStroke = Instance.new("UIStroke", BombCountBox)
+BombCountBoxStroke.Color        = BORDER
+BombCountBoxStroke.Thickness    = 1
+BombCountBoxStroke.Transparency = 0.18
+
+local BombCountUnit = Instance.new("TextLabel", BombCard)
+BombCountUnit.Size               = UDim2.new(0, 22, 0, 19)
+BombCountUnit.Position           = UDim2.new(1, -46, 0, 29)
+BombCountUnit.BackgroundTransparency = 1
+BombCountUnit.Text               = "sec"
+BombCountUnit.TextColor3         = TEXT_FAINT
+BombCountUnit.TextSize           = 8
+BombCountUnit.Font               = Enum.Font.Gotham
+BombCountUnit.ZIndex             = 7
+
+-- Studs row
+local BombStudsLabel = Instance.new("TextLabel", BombCard)
+BombStudsLabel.Size               = UDim2.new(0.52, 0, 0, 11)
+BombStudsLabel.Position           = UDim2.new(0, 12, 0, 52)
+BombStudsLabel.BackgroundTransparency = 1
+BombStudsLabel.Text               = "Studs to carrier"
+BombStudsLabel.TextColor3         = TEXT_SUB
+BombStudsLabel.TextSize           = 8
+BombStudsLabel.Font               = Enum.Font.Gotham
+BombStudsLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local BombStudsBox = Instance.new("TextBox", BombCard)
+BombStudsBox.Size               = UDim2.new(0, 36, 0, 19)
+BombStudsBox.Position           = UDim2.new(1, -84, 0, 49)
+BombStudsBox.BackgroundColor3   = Color3.fromRGB(18, 18, 25)
+BombStudsBox.Text               = "15"
+BombStudsBox.TextColor3         = Color3.fromRGB(224, 224, 238)
+BombStudsBox.TextSize           = 11
+BombStudsBox.Font               = Enum.Font.GothamBold
+BombStudsBox.ClearTextOnFocus   = false
+BombStudsBox.PlaceholderText    = "15"
+BombStudsBox.PlaceholderColor3  = TEXT_FAINT
+BombStudsBox.BorderSizePixel    = 0
+BombStudsBox.ZIndex             = 6
+BombStudsBox.TextXAlignment     = Enum.TextXAlignment.Center
+Instance.new("UICorner", BombStudsBox).CornerRadius = UDim.new(0, 6)
+
+local BombStudsBoxStroke = Instance.new("UIStroke", BombStudsBox)
+BombStudsBoxStroke.Color        = BORDER
+BombStudsBoxStroke.Thickness    = 1
+BombStudsBoxStroke.Transparency = 0.18
+
+local BombStudsUnit = Instance.new("TextLabel", BombCard)
+BombStudsUnit.Size               = UDim2.new(0, 22, 0, 19)
+BombStudsUnit.Position           = UDim2.new(1, -46, 0, 49)
+BombStudsUnit.BackgroundTransparency = 1
+BombStudsUnit.Text               = "st"
+BombStudsUnit.TextColor3         = TEXT_FAINT
+BombStudsUnit.TextSize           = 8
+BombStudsUnit.Font               = Enum.Font.Gotham
+BombStudsUnit.ZIndex             = 7
+
+-- Status label at bottom of card
+local BombStatusVal = Instance.new("TextLabel", BombCard)
+BombStatusVal.Size               = UDim2.new(1, -24, 0, 11)
+BombStatusVal.Position           = UDim2.new(0, 12, 1, -13)
+BombStatusVal.BackgroundTransparency = 1
+BombStatusVal.Text               = "-"
+BombStatusVal.TextColor3         = TEXT_SUB
+BombStatusVal.TextSize           = 8
+BombStatusVal.Font               = Enum.Font.Gotham
+BombStatusVal.TextXAlignment     = Enum.TextXAlignment.Left
+BombStatusVal.ZIndex             = 4
+
+-- -- SETTINGS PANEL ----------------------------------
+local SettingsPanel = Instance.new("ScrollingFrame", TabContainer)
+SettingsPanel.Size                = UDim2.new(0, 240, 1, 0)
+SettingsPanel.Position            = UDim2.new(0, 240, 0, 0)
+SettingsPanel.BackgroundTransparency = 1
+SettingsPanel.CanvasSize          = UDim2.new(0, 0, 0, 258)
+SettingsPanel.ScrollBarThickness  = 4
+SettingsPanel.ScrollBarImageColor3 = ACCENT_BRIGHT
+SettingsPanel.ScrollBarImageTransparency = 0.45
+SettingsPanel.ScrollingDirection  = Enum.ScrollingDirection.Y
+SettingsPanel.ElasticBehavior     = Enum.ElasticBehavior.Never
+SettingsPanel.ClipsDescendants    = true
+
+local BackBtn = Instance.new("TextButton", SettingsPanel)
+BackBtn.Size             = UDim2.new(0, 56, 0, 22)
+BackBtn.Position         = UDim2.new(0, 12, 0, 10)
+BackBtn.BackgroundColor3 = SURFACE_RAISED
+BackBtn.Text             = "< BACK"
+BackBtn.TextColor3       = Color3.fromRGB(170, 170, 195)
+BackBtn.TextSize         = 9
+BackBtn.Font             = Enum.Font.GothamBold
+BackBtn.BorderSizePixel  = 0
+BackBtn.AutoButtonColor  = false
+BackBtn.ZIndex           = 6
+Instance.new("UICorner", BackBtn).CornerRadius = UDim.new(0, 8)
+
+local BackStroke = Instance.new("UIStroke", BackBtn)
+BackStroke.Color        = BORDER
+BackStroke.Thickness    = 1
+BackStroke.Transparency = 0.32
+
+local SettingsTitle = Instance.new("TextLabel", SettingsPanel)
+SettingsTitle.Size               = UDim2.new(1, -24, 0, 22)
+SettingsTitle.Position           = UDim2.new(0, 80, 0, 10)
+SettingsTitle.BackgroundTransparency = 1
+SettingsTitle.Text               = "SETTINGS"
+SettingsTitle.TextColor3         = TEXT_MAIN
+SettingsTitle.TextSize           = 10
+SettingsTitle.Font               = Enum.Font.GothamBlack
+SettingsTitle.TextXAlignment     = Enum.TextXAlignment.Left
+SettingsTitle.ZIndex             = 5
+
+local SDivider = Instance.new("Frame", SettingsPanel)
+SDivider.Size             = UDim2.new(1, -24, 0, 1)
+SDivider.Position         = UDim2.new(0, 12, 0, 38)
+SDivider.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+SDivider.BorderSizePixel  = 0
+
+-- Lock Mini row
+local LockRow = Instance.new("Frame", SettingsPanel)
+LockRow.Size               = UDim2.new(1, -24, 0, 34)
+LockRow.Position           = UDim2.new(0, 12, 0, 48)
+LockRow.BackgroundColor3   = SURFACE
+LockRow.BorderSizePixel    = 0
+Instance.new("UICorner", LockRow).CornerRadius = UDim.new(0, 10)
+
+local LockRowStroke = Instance.new("UIStroke", LockRow)
+LockRowStroke.Color        = BORDER
+LockRowStroke.Thickness    = 1
+LockRowStroke.Transparency = 0.22
+
+local LockLabel = Instance.new("TextLabel", LockRow)
+LockLabel.Size               = UDim2.new(1, -52, 1, 0)
+LockLabel.Position           = UDim2.new(0, 12, 0, 0)
+LockLabel.BackgroundTransparency = 1
+LockLabel.Text               = "Lock Mini Toggle"
+LockLabel.TextColor3         = Color3.fromRGB(205, 205, 222)
+LockLabel.TextSize           = 10
+LockLabel.Font               = Enum.Font.GothamBold
+LockLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local LockSubLabel = Instance.new("TextLabel", LockRow)
+LockSubLabel.Size               = UDim2.new(1, -52, 0, 12)
+LockSubLabel.Position           = UDim2.new(0, 12, 1, -13)
+LockSubLabel.BackgroundTransparency = 1
+LockSubLabel.Text               = "Prevents mini circle from moving"
+LockSubLabel.TextColor3         = TEXT_SUB
+LockSubLabel.TextSize           = 8
+LockSubLabel.Font               = Enum.Font.Gotham
+LockSubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local LockToggle = Instance.new("TextButton", LockRow)
+LockToggle.Size             = UDim2.new(0, 36, 0, 18)
+LockToggle.Position         = UDim2.new(1, -44, 0.5, -9)
+LockToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+LockToggle.Text             = ""
+LockToggle.BorderSizePixel  = 0
+LockToggle.AutoButtonColor  = false
+LockToggle.ZIndex           = 6
+Instance.new("UICorner", LockToggle).CornerRadius = UDim.new(1, 0)
+
+local LockToggleStroke = Instance.new("UIStroke", LockToggle)
+LockToggleStroke.Color        = BORDER
+LockToggleStroke.Thickness    = 1
+LockToggleStroke.Transparency = 0.18
+
+local LockThumb = Instance.new("Frame", LockToggle)
+LockThumb.Size             = UDim2.new(0, 12, 0, 12)
+LockThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+LockThumb.BackgroundColor3 = Color3.fromRGB(112, 112, 132)
+LockThumb.BorderSizePixel  = 0
+LockThumb.ZIndex           = 7
+Instance.new("UICorner", LockThumb).CornerRadius = UDim.new(1, 0)
+
+-- -- Double Jump row (replaces Hitbox Expander) -------
+local DJDivider = Instance.new("Frame", SettingsPanel)
+DJDivider.Size             = UDim2.new(1, -24, 0, 1)
+DJDivider.Position         = UDim2.new(0, 12, 0, 90)
+DJDivider.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+DJDivider.BorderSizePixel  = 0
+
+local DJRow = Instance.new("Frame", SettingsPanel)
+DJRow.Size               = UDim2.new(1, -24, 0, 44)
+DJRow.Position           = UDim2.new(0, 12, 0, 99)
+DJRow.BackgroundColor3   = SURFACE
+DJRow.BorderSizePixel    = 0
+Instance.new("UICorner", DJRow).CornerRadius = UDim.new(0, 10)
+
+local DJRowStroke = Instance.new("UIStroke", DJRow)
+DJRowStroke.Color        = BORDER
+DJRowStroke.Thickness    = 1
+DJRowStroke.Transparency = 0.22
+
+local DJDot = Instance.new("Frame", DJRow)
+DJDot.Size             = UDim2.new(0, 6, 0, 6)
+DJDot.Position         = UDim2.new(0, 12, 0.5, -3)
+DJDot.BackgroundColor3 = ACCENT_DIM
+DJDot.BorderSizePixel  = 0
+DJDot.ZIndex           = 4
+Instance.new("UICorner", DJDot).CornerRadius = UDim.new(1, 0)
+
+local DJLabel = Instance.new("TextLabel", DJRow)
+DJLabel.Size               = UDim2.new(1, -58, 0, 16)
+DJLabel.Position           = UDim2.new(0, 26, 0, 5)
+DJLabel.BackgroundTransparency = 1
+DJLabel.Text               = "Double Jump"
+DJLabel.TextColor3         = Color3.fromRGB(205, 205, 222)
+DJLabel.TextSize           = 10
+DJLabel.Font               = Enum.Font.GothamBold
+DJLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local DJSubLabel = Instance.new("TextLabel", DJRow)
+DJSubLabel.Size               = UDim2.new(1, -58, 0, 11)
+DJSubLabel.Position           = UDim2.new(0, 26, 1, -14)
+DJSubLabel.BackgroundTransparency = 1
+DJSubLabel.Text               = "One extra jump while airborne"
+DJSubLabel.TextColor3         = TEXT_SUB
+DJSubLabel.TextSize           = 8
+DJSubLabel.Font               = Enum.Font.Gotham
+DJSubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local DJToggle = Instance.new("TextButton", DJRow)
+DJToggle.Size             = UDim2.new(0, 36, 0, 18)
+DJToggle.Position         = UDim2.new(1, -44, 0.5, -9)
+DJToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+DJToggle.Text             = ""
+DJToggle.BorderSizePixel  = 0
+DJToggle.AutoButtonColor  = false
+DJToggle.ZIndex           = 6
+Instance.new("UICorner", DJToggle).CornerRadius = UDim.new(1, 0)
+
+local DJToggleStroke = Instance.new("UIStroke", DJToggle)
+DJToggleStroke.Color        = BORDER
+DJToggleStroke.Thickness    = 1
+DJToggleStroke.Transparency = 0.18
+
+local DJThumb = Instance.new("Frame", DJToggle)
+DJThumb.Size             = UDim2.new(0, 12, 0, 12)
+DJThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+DJThumb.BackgroundColor3 = Color3.fromRGB(112, 112, 132)
+DJThumb.BorderSizePixel  = 0
+DJThumb.ZIndex           = 7
+Instance.new("UICorner", DJThumb).CornerRadius = UDim.new(1, 0)
+
+-- -- DJ Power textbox row -----------------------------
+local DJPowerDivider = Instance.new("Frame", SettingsPanel)
+DJPowerDivider.Size             = UDim2.new(1, -24, 0, 1)
+DJPowerDivider.Position         = UDim2.new(0, 12, 0, 151)
+DJPowerDivider.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+DJPowerDivider.BorderSizePixel  = 0
+
+local DJPowerRow = Instance.new("Frame", SettingsPanel)
+DJPowerRow.Size               = UDim2.new(1, -24, 0, 34)
+DJPowerRow.Position           = UDim2.new(0, 12, 0, 160)
+DJPowerRow.BackgroundColor3   = SURFACE
+DJPowerRow.BorderSizePixel    = 0
+Instance.new("UICorner", DJPowerRow).CornerRadius = UDim.new(0, 10)
+
+local DJPowerRowStroke = Instance.new("UIStroke", DJPowerRow)
+DJPowerRowStroke.Color        = BORDER
+DJPowerRowStroke.Thickness    = 1
+DJPowerRowStroke.Transparency = 0.22
+
+local DJPowerLabel = Instance.new("TextLabel", DJPowerRow)
+DJPowerLabel.Size               = UDim2.new(0.55, 0, 1, 0)
+DJPowerLabel.Position           = UDim2.new(0, 12, 0, 0)
+DJPowerLabel.BackgroundTransparency = 1
+DJPowerLabel.Text               = "Jump Power"
+DJPowerLabel.TextColor3         = Color3.fromRGB(205, 205, 222)
+DJPowerLabel.TextSize           = 10
+DJPowerLabel.Font               = Enum.Font.GothamBold
+DJPowerLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local DJPowerBox = Instance.new("TextBox", DJPowerRow)
+DJPowerBox.Size               = UDim2.new(0, 48, 0, 22)
+DJPowerBox.Position           = UDim2.new(1, -58, 0.5, -11)
+DJPowerBox.BackgroundColor3   = Color3.fromRGB(18, 18, 26)
+DJPowerBox.Text               = "0.6"
+DJPowerBox.TextColor3         = Color3.fromRGB(224, 224, 238)
+DJPowerBox.TextSize           = 11
+DJPowerBox.Font               = Enum.Font.GothamBold
+DJPowerBox.ClearTextOnFocus   = false
+DJPowerBox.PlaceholderText    = "0.6"
+DJPowerBox.PlaceholderColor3  = TEXT_FAINT
+DJPowerBox.BorderSizePixel    = 0
+DJPowerBox.ZIndex             = 6
+DJPowerBox.TextXAlignment     = Enum.TextXAlignment.Center
+Instance.new("UICorner", DJPowerBox).CornerRadius = UDim.new(0, 7)
+
+local DJPowerBoxStroke = Instance.new("UIStroke", DJPowerBox)
+DJPowerBoxStroke.Color        = BORDER
+DJPowerBoxStroke.Thickness    = 1
+DJPowerBoxStroke.Transparency = 0.18
+
+local DJPowerUnit = Instance.new("TextLabel", DJPowerRow)
+DJPowerUnit.Size               = UDim2.new(0, 16, 0, 14)
+DJPowerUnit.Position           = UDim2.new(1, -12, 0.5, -7)
+DJPowerUnit.BackgroundTransparency = 1
+DJPowerUnit.Text               = "x"
+DJPowerUnit.TextColor3         = TEXT_FAINT
+DJPowerUnit.TextSize           = 9
+DJPowerUnit.Font               = Enum.Font.GothamBold
+DJPowerUnit.ZIndex             = 7
+
+-- -- Status Gui toggle row ----------------------------
+local SGDivider = Instance.new("Frame", SettingsPanel)
+SGDivider.Size             = UDim2.new(1, -24, 0, 1)
+SGDivider.Position         = UDim2.new(0, 12, 0, 202)
+SGDivider.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+SGDivider.BorderSizePixel  = 0
+
+local SGRow = Instance.new("Frame", SettingsPanel)
+SGRow.Size               = UDim2.new(1, -24, 0, 34)
+SGRow.Position           = UDim2.new(0, 12, 0, 211)
+SGRow.BackgroundColor3   = SURFACE
+SGRow.BorderSizePixel    = 0
+Instance.new("UICorner", SGRow).CornerRadius = UDim.new(0, 10)
+
+local SGRowStroke = Instance.new("UIStroke", SGRow)
+SGRowStroke.Color        = BORDER
+SGRowStroke.Thickness    = 1
+SGRowStroke.Transparency = 0.22
+
+local SGDot = Instance.new("Frame", SGRow)
+SGDot.Size             = UDim2.new(0, 6, 0, 6)
+SGDot.Position         = UDim2.new(0, 12, 0.5, -3)
+SGDot.BackgroundColor3 = ACCENT_DIM
+SGDot.BorderSizePixel  = 0
+SGDot.ZIndex           = 4
+Instance.new("UICorner", SGDot).CornerRadius = UDim.new(1, 0)
+
+local SGLabel = Instance.new("TextLabel", SGRow)
+SGLabel.Size               = UDim2.new(1, -58, 0, 16)
+SGLabel.Position           = UDim2.new(0, 26, 0, 5)
+SGLabel.BackgroundTransparency = 1
+SGLabel.Text               = "Status Gui"
+SGLabel.TextColor3         = Color3.fromRGB(205, 205, 222)
+SGLabel.TextSize           = 10
+SGLabel.Font               = Enum.Font.GothamBold
+SGLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local SGSubLabel = Instance.new("TextLabel", SGRow)
+SGSubLabel.Size               = UDim2.new(1, -58, 0, 11)
+SGSubLabel.Position           = UDim2.new(0, 26, 1, -14)
+SGSubLabel.BackgroundTransparency = 1
+SGSubLabel.Text               = "Draggable status overlay"
+SGSubLabel.TextColor3         = TEXT_SUB
+SGSubLabel.TextSize           = 8
+SGSubLabel.Font               = Enum.Font.Gotham
+SGSubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local SGToggle = Instance.new("TextButton", SGRow)
+SGToggle.Size             = UDim2.new(0, 36, 0, 18)
+SGToggle.Position         = UDim2.new(1, -44, 0.5, -9)
+SGToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+SGToggle.Text             = ""
+SGToggle.BorderSizePixel  = 0
+SGToggle.AutoButtonColor  = false
+SGToggle.ZIndex           = 6
+Instance.new("UICorner", SGToggle).CornerRadius = UDim.new(1, 0)
+
+local SGToggleStroke = Instance.new("UIStroke", SGToggle)
+SGToggleStroke.Color        = BORDER
+SGToggleStroke.Thickness    = 1
+SGToggleStroke.Transparency = 0.18
+
+local SGThumb = Instance.new("Frame", SGToggle)
+SGThumb.Size             = UDim2.new(0, 12, 0, 12)
+SGThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+SGThumb.BackgroundColor3 = Color3.fromRGB(112, 112, 132)
+SGThumb.BorderSizePixel  = 0
+SGThumb.ZIndex           = 7
+Instance.new("UICorner", SGThumb).CornerRadius = UDim.new(1, 0)
+
+-- Wire up the forward-declared reference to the main panel card status
+autoBombStatusVal = BombStatusVal
+
+-- =====================================================
+--  SHOW / HIDE BUTTON  (right screen edge)
+-- =====================================================
+local ShowBtn = Instance.new("TextButton", SG)
+ShowBtn.Size             = UDim2.new(0, 24, 0, 46)
+ShowBtn.Position         = UDim2.new(1, -24, 0.5, -23)
+ShowBtn.BackgroundColor3 = SURFACE_RAISED
+ShowBtn.Text             = ""
+ShowBtn.BorderSizePixel  = 0
+ShowBtn.AutoButtonColor  = false
+ShowBtn.ZIndex           = 50
+Instance.new("UICorner", ShowBtn).CornerRadius = UDim.new(0, 8)
+
+local ShowStroke = Instance.new("UIStroke", ShowBtn)
+ShowStroke.Color        = BORDER
+ShowStroke.Thickness    = 1
+ShowStroke.Transparency = 0.35
+
+local ArrowLbl = Instance.new("TextLabel", ShowBtn)
+ArrowLbl.Size               = UDim2.new(1, 0, 1, 0)
+ArrowLbl.BackgroundTransparency = 1
+ArrowLbl.Text               = "<"
+ArrowLbl.TextColor3         = TEXT_MAIN
+ArrowLbl.TextSize           = 18
+ArrowLbl.Font               = Enum.Font.GothamBold
+ArrowLbl.ZIndex             = 51
+
+-- =====================================================
+--  MINI CIRCLE
+-- =====================================================
+local Mini = Instance.new("TextButton", SG)
+Mini.Name             = "MiniCircle"
+Mini.Size             = UDim2.new(0, 56, 0, 56)
+Mini.Position         = UDim2.new(0, 28, 0.5, 10)
+Mini.AnchorPoint      = Vector2.new(0.5, 0.5)
+Mini.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+Mini.Text             = ""
+Mini.BorderSizePixel  = 0
+Mini.AutoButtonColor  = false
+Mini.Visible          = false
+Mini.Active           = true
+Mini.Draggable        = true
+Mini.ZIndex           = 60
+Instance.new("UICorner", Mini).CornerRadius = UDim.new(1, 0)
+
+local MiniGlow = Instance.new("UIStroke", Mini)
+MiniGlow.Color        = ACCENT_BRIGHT
+MiniGlow.Thickness    = 2.2
+MiniGlow.Transparency = 0.48
+
+local MiniShadFrame = Instance.new("Frame", SG)
+MiniShadFrame.Size             = UDim2.new(0, 84, 0, 84)
+MiniShadFrame.AnchorPoint      = Vector2.new(0.5, 0.5)
+MiniShadFrame.Position         = UDim2.new(0, 28, 0.5, 14)
+MiniShadFrame.BackgroundTransparency = 1
+MiniShadFrame.ZIndex           = 58
+MiniShadFrame.Visible          = false
+
+local MiniShad = Instance.new("ImageLabel", MiniShadFrame)
+MiniShad.AnchorPoint           = Vector2.new(0.5, 0.5)
+MiniShad.BackgroundTransparency = 1
+MiniShad.Position              = UDim2.new(0.5, 0, 0.5, 0)
+MiniShad.Size                  = UDim2.new(1, 0, 1, 0)
+MiniShad.ZIndex                = 58
+MiniShad.Image                 = "rbxassetid://6014261993"
+MiniShad.ImageColor3           = Color3.fromRGB(0, 0, 0)
+MiniShad.ImageTransparency     = 0.36
+MiniShad.ScaleType             = Enum.ScaleType.Slice
+MiniShad.SliceCenter           = Rect.new(49, 49, 450, 450)
+
+local MiniInnerRing = Instance.new("Frame", Mini)
+MiniInnerRing.Size             = UDim2.new(0, 44, 0, 44)
+MiniInnerRing.Position         = UDim2.new(0.5, -22, 0.5, -22)
+MiniInnerRing.BackgroundTransparency = 1
+MiniInnerRing.ZIndex           = 61
+Instance.new("UICorner", MiniInnerRing).CornerRadius = UDim.new(1, 0)
+
+local MiniInnerStroke = Instance.new("UIStroke", MiniInnerRing)
+MiniInnerStroke.Color        = ACCENT_BRIGHT
+MiniInnerStroke.Thickness    = 1
+MiniInnerStroke.Transparency = 0.72
+
+local MiniLbl = Instance.new("TextLabel", Mini)
+MiniLbl.Size               = UDim2.new(1, 0, 0.5, 2)
+MiniLbl.Position           = UDim2.new(0, 0, 0.5, -1)
+MiniLbl.BackgroundTransparency = 1
+MiniLbl.Text               = "OFF"
+MiniLbl.TextColor3         = Color3.fromRGB(124, 115, 175)
+MiniLbl.TextSize           = 12
+MiniLbl.Font               = Enum.Font.GothamBlack
+MiniLbl.ZIndex             = 63
+
+local MiniDot = Instance.new("Frame", Mini)
+MiniDot.Size             = UDim2.new(0, 5, 0, 5)
+MiniDot.Position         = UDim2.new(0.5, -2, 0, 10)
+MiniDot.BackgroundColor3 = Color3.fromRGB(96, 80, 150)
+MiniDot.BorderSizePixel  = 0
+MiniDot.ZIndex           = 63
+Instance.new("UICorner", MiniDot).CornerRadius = UDim.new(1, 0)
+
+local MiniHoldBar = Instance.new("Frame", Mini)
+MiniHoldBar.Size             = UDim2.new(0, 0, 0, 2)
+MiniHoldBar.Position         = UDim2.new(0.5, 0, 1, -8)
+MiniHoldBar.AnchorPoint      = Vector2.new(0.5, 0)
+MiniHoldBar.BackgroundColor3 = ACCENT_BRIGHT
+MiniHoldBar.BorderSizePixel  = 0
+MiniHoldBar.ZIndex           = 65
+Instance.new("UICorner", MiniHoldBar).CornerRadius = UDim.new(0, 1)
+
+local LockIcon = Instance.new("TextLabel", Mini)
+LockIcon.Size               = UDim2.new(1, 0, 0, 12)
+LockIcon.Position           = UDim2.new(0, 0, 0, 7)
+LockIcon.BackgroundTransparency = 1
+LockIcon.Text               = "[L]"
+LockIcon.TextColor3         = Color3.fromRGB(210, 210, 230)
+LockIcon.TextSize           = 9
+LockIcon.Font               = Enum.Font.GothamBold
+LockIcon.ZIndex             = 64
+LockIcon.Visible            = false
+
+-- =====================================================
+--  ANIMATIONS
+-- =====================================================
+local pulseRunning = false
+
+local function doPulse()
+	if not tracking or not pulseRunning then return end
+
+	PulseDot.BackgroundColor3 = ACCENT_BRIGHT
+
+	PulseRing.Size     = UDim2.new(0, 7, 0, 7)
+	PulseRing.Position = UDim2.new(0, 14, 0.5, -3)
+	PulseStroke.Transparency = 0.08
+
+	tw(PulseRing, { Size = UDim2.new(0, 22, 0, 22) }, 0.62, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+	tw(PulseRing, { Position = UDim2.new(0, 6.5, 0.5, -10.5) }, 0.62, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+	tw(PulseStroke, { Transparency = 1 }, 0.62, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+	task.delay(0.72, function()
+		if pulseRunning and tracking then doPulse() end
+	end)
+end
+
+local function doShimmer()
+	-- Shimmer sweeps inside BtnClip only - won't bleed outside
+	BtnShimmer.Position = UDim2.new(-0.75, 0, 0, 0)
+	BtnShimmer.BackgroundTransparency = 0.95
+
+	tw(
+		BtnShimmer,
+		{ Position = UDim2.new(1.45, 0, 0, 0), BackgroundTransparency = 0.84 },
+		0.58,
+		Enum.EasingStyle.Quart,
+		Enum.EasingDirection.InOut
+	)
+end
+
+local function doMiniEntrance()
+	Mini.Rotation = -16
+	Mini.Size     = UDim2.new(0, 6, 0, 6)
+
+	tw(Mini, { Size = UDim2.new(0, 56, 0, 56), Rotation = 0 }, 0.46, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+end
+
+local miniGlowConn = nil
+
+local function startMiniGlow()
+	if miniGlowConn then return end
+	miniGlowConn = RunService.Heartbeat:Connect(function() end) -- keep-alive stub
+
+	local function loop()
+		if not tracking or not miniVisible then
+			if miniGlowConn then miniGlowConn:Disconnect(); miniGlowConn = nil end
+			return
+		end
+
+		tw(MiniGlow, { Transparency = 0.06, Thickness = 3.0 }, 0.62, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+
+		task.delay(0.66, function()
+			if not tracking or not miniVisible then
+				if miniGlowConn then miniGlowConn:Disconnect(); miniGlowConn = nil end
+				return
+			end
+
+			tw(MiniGlow, { Transparency = 0.52, Thickness = 1.8 }, 0.62, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+			task.delay(0.66, loop)
+		end)
+	end
+
+	loop()
+end
+
+local function stopMiniGlow()
+	if miniGlowConn then miniGlowConn:Disconnect(); miniGlowConn = nil end
+	tw(MiniGlow, { Transparency = 0.48, Thickness = 2.2 }, 0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+end
+
+-- (Line ESP toggle UI removed - ESP row deleted from main panel)
+
+-- =====================================================
+--  LOCK MINI
+-- =====================================================
+local function applyMiniLock()
+	Mini.Draggable   = not miniLocked
+	LockIcon.Visible = miniLocked
+
+	if miniLocked then
+		tw(LockToggle,      { BackgroundColor3 = Color3.fromRGB(46, 40, 72) }, 0.18)
+		tw(LockThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = ACCENT_BRIGHT }, 0.22, Enum.EasingStyle.Back)
+		tw(LockToggleStroke,{ Color = ACCENT_BRIGHT }, 0.18)
+	else
+		tw(LockToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 30) }, 0.18)
+		tw(LockThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(112, 112, 132) }, 0.22, Enum.EasingStyle.Back)
+		tw(LockToggleStroke,{ Color = BORDER }, 0.18)
+	end
+end
+
+LockToggle.MouseButton1Click:Connect(function()
+	miniLocked = not miniLocked
+	applyMiniLock()
+end)
+
+-- -- Double Jump toggle handler ------------------------
+local function applyDJToggle()
+	if doubleJumpOn then
+		tw(DJToggle,      { BackgroundColor3 = Color3.fromRGB(46, 40, 72) }, 0.18)
+		tw(DJThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = ACCENT_BRIGHT }, 0.22, Enum.EasingStyle.Back)
+		tw(DJToggleStroke,{ Color = ACCENT_BRIGHT }, 0.18)
+		tw(DJDot,         { BackgroundColor3 = ACCENT_BRIGHT }, 0.2)
+		tw(DJLabel,       { TextColor3 = TEXT_MAIN }, 0.2)
+		tw(DJRowStroke,   { Color = ACCENT_DIM, Transparency = 0.10 }, 0.2)
+		startDoubleJump()
+	else
+		tw(DJToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 30) }, 0.18)
+		tw(DJThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(112, 112, 132) }, 0.22, Enum.EasingStyle.Back)
+		tw(DJToggleStroke,{ Color = BORDER }, 0.18)
+		tw(DJDot,         { BackgroundColor3 = ACCENT_DIM }, 0.2)
+		tw(DJLabel,       { TextColor3 = Color3.fromRGB(205, 205, 222) }, 0.2)
+		tw(DJRowStroke,   { Color = BORDER, Transparency = 0.22 }, 0.2)
+		stopDoubleJump()
+	end
+end
+
+DJToggle.MouseButton1Click:Connect(function()
+	doubleJumpOn = not doubleJumpOn
+	applyDJToggle()
+end)
+
+DJToggle.MouseEnter:Connect(function()
+	tw(DJRow, { BackgroundColor3 = SURFACE_HOVER }, 0.14)
+end)
+
+DJToggle.MouseLeave:Connect(function()
+	tw(DJRow, { BackgroundColor3 = SURFACE }, 0.14)
+end)
+
+DJPowerBox.FocusLost:Connect(function()
+	local val = tonumber(DJPowerBox.Text)
+	if val then
+		val = math.clamp(math.floor(val * 100 + 0.5) / 100, 0.3, 1.0)
+		DOUBLE_JUMP_POWER = val
+		DJPowerBox.Text = tostring(DOUBLE_JUMP_POWER)
+
+		tw(DJPowerBoxStroke, { Color = ACCENT_BRIGHT }, 0.12)
+		task.delay(0.6, function()
+			tw(DJPowerBoxStroke, { Color = BORDER }, 0.3)
+		end)
+	else
+		DJPowerBox.Text = tostring(DOUBLE_JUMP_POWER)
+
+		tw(DJPowerBoxStroke, { Color = Color3.fromRGB(235, 80, 80) }, 0.12)
+		task.delay(0.6, function()
+			tw(DJPowerBoxStroke, { Color = BORDER }, 0.3)
+		end)
+	end
+end)
+
+-- -- Auto Get Bomb toggle handler ---------------------
+local BombRowStroke = BombCardStroke  -- alias for handler reuse
+
+local function applyBombToggle()
+	if autoBomb then
+		tw(BombToggle,      { BackgroundColor3 = Color3.fromRGB(46, 40, 72) }, 0.18)
+		tw(BombThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = ACCENT_BRIGHT }, 0.22, Enum.EasingStyle.Back)
+		tw(BombToggleStroke,{ Color = ACCENT_BRIGHT }, 0.18)
+		tw(BombDot,         { BackgroundColor3 = ACCENT_BRIGHT }, 0.2)
+		tw(BombLabel,       { TextColor3 = TEXT_MAIN }, 0.2)
+		tw(BombCardStroke,  { Color = ACCENT_DIM, Transparency = 0.08 }, 0.2)
+		startAutoBomb()
+	else
+		tw(BombToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 30) }, 0.18)
+		tw(BombThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(112, 112, 132) }, 0.22, Enum.EasingStyle.Back)
+		tw(BombToggleStroke,{ Color = BORDER }, 0.18)
+		tw(BombDot,         { BackgroundColor3 = ACCENT_DIM }, 0.2)
+		tw(BombLabel,       { TextColor3 = Color3.fromRGB(205, 205, 222) }, 0.2)
+		tw(BombCardStroke,  { Color = BORDER, Transparency = 0.22 }, 0.2)
+		stopAutoBomb()
+	end
+end
+
+BombToggle.MouseButton1Click:Connect(function()
+	autoBomb = not autoBomb
+	applyBombToggle()
+end)
+
+BombCountBox.FocusLost:Connect(function()
+	local val = tonumber(BombCountBox.Text)
+	if val and val > 0 then
+		AUTOBOMB_COUNTDOWN = math.floor(val)
+		BombCountBox.Text = tostring(AUTOBOMB_COUNTDOWN)
+
+		tw(BombCountBoxStroke, { Color = ACCENT_BRIGHT }, 0.12)
+		task.delay(0.6, function() tw(BombCountBoxStroke, { Color = BORDER }, 0.3) end)
+	else
+		BombCountBox.Text = tostring(AUTOBOMB_COUNTDOWN)
+
+		tw(BombCountBoxStroke, { Color = Color3.fromRGB(235, 80, 80) }, 0.12)
+		task.delay(0.6, function() tw(BombCountBoxStroke, { Color = BORDER }, 0.3) end)
+	end
+end)
+
+BombStudsBox.FocusLost:Connect(function()
+	local val = tonumber(BombStudsBox.Text)
+	if val then
+		val = math.clamp(math.floor(val), 1, 100)
+		AUTOBOMB_STUDS = val
+		BombStudsBox.Text = tostring(AUTOBOMB_STUDS)
+
+		tw(BombStudsBoxStroke, { Color = ACCENT_BRIGHT }, 0.12)
+		task.delay(0.6, function() tw(BombStudsBoxStroke, { Color = BORDER }, 0.3) end)
+	else
+		BombStudsBox.Text = tostring(AUTOBOMB_STUDS)
+
+		tw(BombStudsBoxStroke, { Color = Color3.fromRGB(235, 80, 80) }, 0.12)
+		task.delay(0.6, function() tw(BombStudsBoxStroke, { Color = BORDER }, 0.3) end)
+	end
+end)
+
+-- =====================================================
+--  SETTINGS TAB NAVIGATION
+-- =====================================================
+local function openSettings()
+	onSettings = true
+	tw(TabContainer,     { Position = UDim2.new(-1, 0, 0, 45) }, 0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	tw(SettingsBtn,      { TextColor3 = TEXT_MAIN }, 0.16)
+	tw(SettingsBtnStroke,{ Color = ACCENT_BRIGHT }, 0.16)
+end
+
+local function closeSettings()
+	onSettings = false
+	tw(TabContainer,     { Position = UDim2.new(0, 0, 0, 45) }, 0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	tw(SettingsBtn,      { TextColor3 = Color3.fromRGB(150, 150, 175) }, 0.16)
+	tw(SettingsBtnStroke,{ Color = BORDER }, 0.16)
+end
+
+SettingsBtn.MouseButton1Click:Connect(function()
+	if onSettings then closeSettings() else openSettings() end
+end)
+
+SettingsBtn.MouseEnter:Connect(function()
+	tw(SettingsBtn, { BackgroundColor3 = SURFACE_HOVER }, 0.14)
+end)
+
+SettingsBtn.MouseLeave:Connect(function()
+	tw(SettingsBtn, { BackgroundColor3 = SURFACE_RAISED }, 0.14)
+end)
+
+BackBtn.MouseButton1Click:Connect(function() closeSettings() end)
+
+BackBtn.MouseEnter:Connect(function()
+	tw(BackBtn, { BackgroundColor3 = SURFACE_HOVER }, 0.14)
+end)
+
+BackBtn.MouseLeave:Connect(function()
+	tw(BackBtn, { BackgroundColor3 = SURFACE_RAISED }, 0.14)
+end)
+
+-- =====================================================
+--  SHOW / HIDE MAIN WINDOW
+-- =====================================================
+local WIN_Y = -(WIN_H / 2)
+
+local function setMainVisible(visible)
+	mainVisible = visible
+
+	if visible then
+		Win.Visible       = true
+		ShadFrame.Visible = true
+
+		tw(Win,       { Position = UDim2.new(0, 28, 0.5, WIN_Y) }, 0.38, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		tw(ShadFrame, { Position = UDim2.new(0, 10, 0.5, WIN_Y - 18) }, 0.38, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+		ArrowLbl.Text = "<"
+	else
+		tw(Win,       { Position = UDim2.new(0, -270, 0.5, WIN_Y) }, 0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+		tw(ShadFrame, { Position = UDim2.new(0, -290, 0.5, WIN_Y - 18) }, 0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+
+		task.delay(0.26, function()
+			if not mainVisible then Win.Visible = false; ShadFrame.Visible = false end
+		end)
+
+		ArrowLbl.Text = ">"
+	end
+end
+
+ShowBtn.MouseButton1Click:Connect(function()
+	setMainVisible(not mainVisible)
+end)
+
+ShowBtn.MouseEnter:Connect(function()
+	tw(ShowBtn,   { BackgroundColor3 = SURFACE_HOVER }, 0.14)
+	tw(ShowStroke,{ Transparency = 0.12 }, 0.14)
+end)
+
+ShowBtn.MouseLeave:Connect(function()
+	tw(ShowBtn,   { BackgroundColor3 = SURFACE_RAISED }, 0.14)
+	tw(ShowStroke,{ Transparency = 0.35 }, 0.14)
+end)
+
+-- =====================================================
+--  MINI CIRCLE SHOW / HIDE
+-- =====================================================
+local function syncMiniShadow()
+	if not miniVisible then return end
+
+	local ap = Mini.AbsolutePosition
+	local as = Mini.AbsoluteSize
+
+	MiniShadFrame.Position = UDim2.new(0, ap.X + as.X / 2, 0, ap.Y + as.Y / 2 + 5)
+end
+
+local function showMini()
+	miniVisible = true
+	Mini.Visible          = true
+	MiniShadFrame.Visible = true
+
+	local absPos = Win.AbsolutePosition
+	Mini.Position          = UDim2.new(0, absPos.X + 120, 0.5, 10)
+	MiniShadFrame.Position = UDim2.new(0, absPos.X + 120, 0.5, 15)
+
+	doMiniEntrance()
+	applyMiniLock()
+
+	if tracking then startMiniGlow() end
+end
+
+local function hideMini()
+	miniVisible = false
+	stopMiniGlow()
+
+	tw(Mini, { Size = UDim2.new(0, 0, 0, 0), Rotation = 18 }, 0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+
+	task.delay(0.27, function()
+		if not miniVisible then
+			Mini.Visible          = false
+			MiniShadFrame.Visible = false
+			Mini.Rotation         = 0
+			Mini.Size             = UDim2.new(0, 56, 0, 56)
+		end
+	end)
+end
+
+-- =====================================================
+--  UI UPDATE
+-- =====================================================
+local function applyTrackButtonVisual()
+	if tracking then
+		tw(Btn,      { BackgroundColor3 = Color3.fromRGB(40, 36, 62) }, 0.22)
+		tw(BtnStroke,{ Color = ACCENT_BRIGHT, Transparency = 0.08 }, 0.22)
+		tw(BtnPill,  { BackgroundColor3 = ACCENT_BRIGHT }, 0.22)
+		tw(BtnText,  { TextColor3 = TEXT_MAIN }, 0.22)
+		tw(WinStroke,{ Color = ACCENT_BRIGHT, Transparency = 0.18 }, 0.22)
+		BtnText.Text = "DISABLE"
+	else
+		tw(Btn,      { BackgroundColor3 = SURFACE_RAISED }, 0.22)
+		tw(BtnStroke,{ Color = BORDER, Transparency = 0.22 }, 0.22)
+		tw(BtnPill,  { BackgroundColor3 = Color3.fromRGB(98, 88, 150) }, 0.22)
+		tw(BtnText,  { TextColor3 = Color3.fromRGB(172, 172, 196) }, 0.22)
+		tw(WinStroke,{ Color = BORDER, Transparency = 0.38 }, 0.22)
+		BtnText.Text = "ENABLE"
+	end
+end
+
+local function updateMiniLabel()
+	if tracking then
+		MiniLbl.Text       = "ON"
+		MiniLbl.TextColor3 = TEXT_MAIN
+
+		tw(MiniDot,        { BackgroundColor3 = ACCENT_BRIGHT }, 0.22)
+		tw(MiniInnerStroke,{ Color = ACCENT_BRIGHT, Transparency = 0.28 }, 0.22)
+		tw(Mini,           { BackgroundColor3 = Color3.fromRGB(13, 13, 18) }, 0.22)
+
+		if miniVisible then startMiniGlow() end
+	else
+		MiniLbl.Text       = "OFF"
+		MiniLbl.TextColor3 = Color3.fromRGB(124, 115, 175)
+
+		tw(MiniDot,        { BackgroundColor3 = Color3.fromRGB(96, 80, 150) }, 0.22)
+		tw(MiniInnerStroke,{ Color = ACCENT_BRIGHT, Transparency = 0.72 }, 0.22)
+		tw(Mini,           { BackgroundColor3 = Color3.fromRGB(10, 10, 14) }, 0.22)
+
+		stopMiniGlow()
+	end
+end
+
+local function updateUI()
+	if tracking then
+		if not localHasTool() then
+			StatusVal.Text       = "NO TOOL"
+			StatusVal.TextColor3 = Color3.fromRGB(255, 178, 106)
+			TargetVal.Text       = "-"
+			TargetVal.TextColor3 = TEXT_SUB
+		elseif currentTarget then
+			StatusVal.Text       = "TRACKING"
+			StatusVal.TextColor3 = Color3.fromRGB(146, 226, 176)
+			TargetVal.Text       = currentTarget.Name
+			TargetVal.TextColor3 = TEXT_MAIN
+		else
+			StatusVal.Text       = "SCANNING"
+			StatusVal.TextColor3 = Color3.fromRGB(146, 164, 226)
+			TargetVal.Text       = "-"
+			TargetVal.TextColor3 = TEXT_SUB
+		end
+	else
+		StatusVal.Text       = "IDLE"
+		StatusVal.TextColor3 = TEXT_FAINT
+		TargetVal.Text       = "-"
+		TargetVal.TextColor3 = TEXT_SUB
+	end
+end
+
+-- =====================================================
+--  HOLD LOGIC
+-- =====================================================
+local function startHoldWatch(bar, onComplete)
+	local startT = tick()
+
+	return RunService.Heartbeat:Connect(function()
+		local frac = math.min((tick() - startT) / HOLD_DURATION, 1)
+		bar.Size = UDim2.new(frac, 0, 0, 2)
+		if frac >= 1 then onComplete() end
+	end)
+end
+
+-- Main button
+local mainHoldConn  = nil
+local mainHoldFired = false
+
+Btn.MouseButton1Down:Connect(function()
+	if mainHoldConn then mainHoldConn:Disconnect(); mainHoldConn = nil end
+	mainHoldFired = false
+	HoldBar.Size = UDim2.new(0, 0, 0, 2)
+
+	mainHoldConn = startHoldWatch(HoldBar, function()
+		if mainHoldConn then mainHoldConn:Disconnect(); mainHoldConn = nil end
+		mainHoldFired = true
+		HoldBar.Size = UDim2.new(0, 0, 0, 2)
+
+		if miniVisible then hideMini() else showMini() end
+	end)
+end)
+
+Btn.MouseButton1Up:Connect(function()
+	if mainHoldConn then
+		mainHoldConn:Disconnect(); mainHoldConn = nil
+		tw(HoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.12)
+
+		if not mainHoldFired then
+			tracking = not tracking
+
+			if tracking then
+				startTracking(); doShimmer()
+				pulseRunning = true; doPulse()
+			else
+				stopTracking()
+				pulseRunning = false
+				PulseDot.BackgroundColor3 = ACCENT_DIM
+			end
+
+			applyTrackButtonVisual()
+			updateMiniLabel()
+			updateUI()
+		end
+	end
+end)
+
+-- Mini button
+local miniHoldConn  = nil
+local miniHoldFired = false
+
+Mini.MouseButton1Down:Connect(function()
+	if miniHoldConn then miniHoldConn:Disconnect(); miniHoldConn = nil end
+	miniHoldFired = false
+	MiniHoldBar.Size = UDim2.new(0, 0, 0, 2)
+
+	miniHoldConn = startHoldWatch(MiniHoldBar, function()
+		if miniHoldConn then miniHoldConn:Disconnect(); miniHoldConn = nil end
+		miniHoldFired = true
+		MiniHoldBar.Size = UDim2.new(0, 0, 0, 2)
+
+		hideMini()
+	end)
+end)
+
+Mini.MouseButton1Up:Connect(function()
+	if miniHoldConn then
+		miniHoldConn:Disconnect(); miniHoldConn = nil
+		tw(MiniHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.12)
+
+		if not miniHoldFired then
+			tracking = not tracking
+
+			if tracking then
+				startTracking()
+				pulseRunning = true; doPulse()
+			else
+				stopTracking()
+				pulseRunning = false
+				PulseDot.BackgroundColor3 = ACCENT_DIM
+			end
+
+			applyTrackButtonVisual()
+			updateMiniLabel()
+			updateUI()
+		end
+	end
+end)
+
+-- Hover effects
+Btn.MouseEnter:Connect(function()
+	tw(Btn, { BackgroundColor3 = tracking and Color3.fromRGB(46, 42, 70) or SURFACE_HOVER }, 0.14)
+end)
+
+Btn.MouseLeave:Connect(function()
+	if mainHoldConn then mainHoldConn:Disconnect(); mainHoldConn = nil end
+	tw(HoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.1)
+	tw(Btn, { BackgroundColor3 = tracking and Color3.fromRGB(40, 36, 62) or SURFACE_RAISED }, 0.14)
+end)
+
+Mini.MouseEnter:Connect(function()
+	tw(Mini, { Size = UDim2.new(0, 61, 0, 61) }, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+end)
+
+Mini.MouseLeave:Connect(function()
+	if miniHoldConn then miniHoldConn:Disconnect(); miniHoldConn = nil end
+	tw(MiniHoldBar, { Size = UDim2.new(0, 0, 0, 2) }, 0.1)
+	tw(Mini, { Size = UDim2.new(0, 56, 0, 56) }, 0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+end)
+
+-- =====================================================
+--  STATUS GUI  (separate draggable overlay)
+-- =====================================================
+local StatusWin = Instance.new("Frame", SG)
+StatusWin.Name             = "StatusGui"
+StatusWin.Size             = UDim2.new(0, 180, 0, 112)
+StatusWin.Position         = UDim2.new(1, -208, 0, 60)
+StatusWin.BackgroundColor3 = SURFACE
+StatusWin.BorderSizePixel  = 0
+StatusWin.Active           = true
+StatusWin.Draggable        = true
+StatusWin.Visible          = false
+StatusWin.ZIndex           = 80
+Instance.new("UICorner", StatusWin).CornerRadius = UDim.new(0, 14)
+
+local StatusGrad = Instance.new("UIGradient", StatusWin)
+StatusGrad.Rotation = 90
+StatusGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(17, 17, 23)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 8, 11))
+})
+
+local StatusWinStroke = Instance.new("UIStroke", StatusWin)
+StatusWinStroke.Color           = BORDER
+StatusWinStroke.Thickness       = 1
+StatusWinStroke.Transparency    = 0.26
+StatusWinStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+-- Top accent
+local SWAccent = Instance.new("Frame", StatusWin)
+SWAccent.Size             = UDim2.new(0.4, 0, 0, 2)
+SWAccent.Position         = UDim2.new(0.3, 0, 0, 0)
+SWAccent.BackgroundColor3 = ACCENT
+SWAccent.BorderSizePixel  = 0
+SWAccent.ZIndex           = 82
+Instance.new("UICorner", SWAccent).CornerRadius = UDim.new(0, 2)
+
+local SWAccentGrad = Instance.new("UIGradient", SWAccent)
+SWAccentGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, ACCENT_DIM),
+	ColorSequenceKeypoint.new(0.5, ACCENT_BRIGHT),
+	ColorSequenceKeypoint.new(1, ACCENT_DIM)
+})
+
+-- Header
+local SWHdr = Instance.new("Frame", StatusWin)
+SWHdr.Size             = UDim2.new(1, 0, 0, 28)
+SWHdr.BackgroundColor3 = Color3.fromRGB(14, 14, 19)
+SWHdr.BorderSizePixel  = 0
+SWHdr.ZIndex           = 81
+Instance.new("UICorner", SWHdr).CornerRadius = UDim.new(0, 14)
+
+local SWHdrGrad = Instance.new("UIGradient", SWHdr)
+SWHdrGrad.Rotation = 90
+SWHdrGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 20, 27)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(11, 11, 15))
+})
+
+-- Extend header to cover bottom corners
+local SWHdrFill = Instance.new("Frame", StatusWin)
+SWHdrFill.Size             = UDim2.new(1, 0, 0, 14)
+SWHdrFill.Position         = UDim2.new(0, 0, 0, 14)
+SWHdrFill.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+SWHdrFill.BorderSizePixel  = 0
+SWHdrFill.ZIndex           = 81
+
+-- Title as direct child of StatusWin so nothing clips it
+local SWTitle = Instance.new("TextLabel", StatusWin)
+SWTitle.Size               = UDim2.new(1, -12, 0, 28)
+SWTitle.Position           = UDim2.new(0, 10, 0, 0)
+SWTitle.BackgroundTransparency = 1
+SWTitle.Text               = "STATUS"
+SWTitle.TextColor3         = TEXT_MAIN
+SWTitle.TextSize           = 9
+SWTitle.Font               = Enum.Font.GothamBlack
+SWTitle.TextXAlignment     = Enum.TextXAlignment.Left
+SWTitle.ZIndex             = 84
+
+-- Divider
+local SWDiv = Instance.new("Frame", StatusWin)
+SWDiv.Size             = UDim2.new(1, -16, 0, 1)
+SWDiv.Position         = UDim2.new(0, 8, 0, 28)
+SWDiv.BackgroundColor3 = Color3.fromRGB(34, 32, 48)
+SWDiv.BorderSizePixel  = 0
+SWDiv.ZIndex           = 82
+
+-- Row helper
+local function makeSWRow(labelTxt, yOff)
+	local k = Instance.new("TextLabel", StatusWin)
+	k.Size               = UDim2.new(0, 58, 0, 14)
+	k.Position           = UDim2.new(0, 10, 0, yOff)
+	k.BackgroundTransparency = 1
+	k.Text               = labelTxt
+	k.TextColor3         = TEXT_SUB
+	k.TextSize           = 9
+	k.Font               = Enum.Font.GothamBold
+	k.TextXAlignment     = Enum.TextXAlignment.Left
+	k.ZIndex             = 83
+
+	local v = Instance.new("TextLabel", StatusWin)
+	v.Size               = UDim2.new(1, -72, 0, 14)
+	v.Position           = UDim2.new(0, 68, 0, yOff)
+	v.BackgroundTransparency = 1
+	v.Text               = "-"
+	v.TextColor3         = TEXT_MAIN
+	v.TextSize           = 9
+	v.Font               = Enum.Font.GothamBold
+	v.TextXAlignment     = Enum.TextXAlignment.Left
+	v.ZIndex             = 83
+
+	return v
+end
+
+local SW_TrackVal = makeSWRow("TRACK",  34)
+local SW_BombVal  = makeSWRow("BOMB",   50)
+local SW_FpsVal   = makeSWRow("FPS",    68)
+local SW_PingVal  = makeSWRow("PING",   84)
+
+-- FPS / Ping tracking
+local fpsCounter   = 0
+local fpsLast      = tick()
+local fpsDisplay   = 0
+
+local function updateStatusGui()
+	if not statusGuiOn then return end
+
+	-- Track
+	if tracking then
+		if not localHasTool() then
+			SW_TrackVal.Text       = "NO BOMB"
+			SW_TrackVal.TextColor3 = Color3.fromRGB(255, 178, 106)
+		elseif currentTarget then
+			SW_TrackVal.Text       = currentTarget.Name
+			SW_TrackVal.TextColor3 = Color3.fromRGB(146, 226, 176)
+		else
+			SW_TrackVal.Text       = "SCANNING"
+			SW_TrackVal.TextColor3 = Color3.fromRGB(146, 164, 226)
+		end
+	else
+		SW_TrackVal.Text       = "OFF"
+		SW_TrackVal.TextColor3 = TEXT_FAINT
+	end
+
+	-- Bomb
+	if autoBomb then
+		SW_BombVal.Text       = autoBombStatusVal and autoBombStatusVal.Text or "ON"
+		SW_BombVal.TextColor3 = Color3.fromRGB(190, 190, 205)
+	else
+		SW_BombVal.Text       = "OFF"
+		SW_BombVal.TextColor3 = TEXT_FAINT
+	end
+
+	-- FPS
+	fpsCounter = fpsCounter + 1
+	local now = tick()
+	if now - fpsLast >= 1 then
+		fpsDisplay = fpsCounter
+		fpsCounter = 0
+		fpsLast    = now
+	end
+
+	local fps = fpsDisplay
+	SW_FpsVal.Text       = tostring(fps)
+	SW_FpsVal.TextColor3 = fps >= 55 and Color3.fromRGB(146, 226, 176)
+		or fps >= 30 and Color3.fromRGB(255, 214, 120)
+		or Color3.fromRGB(255, 110, 110)
+
+	-- Ping
+	local ok, ping = pcall(function()
+		return math.floor(Players.LocalPlayer:GetNetworkPing() * 1000)
+	end)
+
+	if ok and ping then
+		SW_PingVal.Text       = tostring(ping) .. " ms"
+		SW_PingVal.TextColor3 = ping < 80  and Color3.fromRGB(146, 226, 176)
+			or ping < 150 and Color3.fromRGB(255, 214, 120)
+			or Color3.fromRGB(255, 110, 110)
+	else
+		SW_PingVal.Text       = "-"
+		SW_PingVal.TextColor3 = TEXT_FAINT
+	end
+end
+
+-- Status Gui toggle handler
+local function applyStatusGuiToggle()
+	if statusGuiOn then
+		tw(SGToggle,      { BackgroundColor3 = Color3.fromRGB(46, 40, 72) }, 0.18)
+		tw(SGThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = ACCENT_BRIGHT }, 0.22, Enum.EasingStyle.Back)
+		tw(SGToggleStroke,{ Color = ACCENT_BRIGHT }, 0.18)
+		tw(SGDot,         { BackgroundColor3 = ACCENT_BRIGHT }, 0.2)
+		tw(SGLabel,       { TextColor3 = TEXT_MAIN }, 0.2)
+		tw(SGRowStroke,   { Color = ACCENT_DIM, Transparency = 0.10 }, 0.2)
+		StatusWin.Visible = true
+	else
+		tw(SGToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 30) }, 0.18)
+		tw(SGThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(112, 112, 132) }, 0.22, Enum.EasingStyle.Back)
+		tw(SGToggleStroke,{ Color = BORDER }, 0.18)
+		tw(SGDot,         { BackgroundColor3 = ACCENT_DIM }, 0.2)
+		tw(SGLabel,       { TextColor3 = Color3.fromRGB(205, 205, 222) }, 0.2)
+		tw(SGRowStroke,   { Color = BORDER, Transparency = 0.22 }, 0.2)
+		StatusWin.Visible = false
+	end
+end
+
+SGToggle.MouseButton1Click:Connect(function()
+	statusGuiOn = not statusGuiOn
+	applyStatusGuiToggle()
+end)
+
+SGToggle.MouseEnter:Connect(function()
+	tw(SGRow, { BackgroundColor3 = SURFACE_HOVER }, 0.14)
+end)
+
+SGToggle.MouseLeave:Connect(function()
+	tw(SGRow, { BackgroundColor3 = SURFACE }, 0.14)
+end)
+
+-- =====================================================
+--  LIVE LOOP
+-- =====================================================
+RunService.Heartbeat:Connect(function()
+	if tracking then updateUI() end
+	if miniVisible and not miniLocked then syncMiniShadow() end
+
+	-- Keep shadow frame glued to the main window (fixes frozen shadow when dragged)
+	if mainVisible then
+		local ap = Win.AbsolutePosition
+		local as = Win.AbsoluteSize
+		ShadFrame.Position = UDim2.new(0, ap.X - 18, 0, ap.Y - 18)
+		ShadFrame.Size     = UDim2.new(0, as.X + 36, 0, as.Y + 36)
+	end
+
+	updateStatusGui()
+end)
+
+-- =====================================================
+--  INIT
+-- =====================================================
+SG.Enabled        = true
+Win.Visible       = true
+ShadFrame.Visible = true
+
+applyTrackButtonVisual()
+updateUI()
+
+-- Small entrance animation
+Win.Position = UDim2.new(0, -280, 0.5, WIN_Y)
+ShadFrame.Position = UDim2.new(0, -300, 0.5, WIN_Y - 18)
+
+task.delay(0.08, function()
+	setMainVisible(true)
+end)
