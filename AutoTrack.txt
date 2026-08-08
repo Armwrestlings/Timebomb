@@ -51,6 +51,14 @@ local doubleJumpUsed  = false  -- tracks if air jump already used this flight
 local doubleJumpConn  = nil
 
 -- -----------------------------------------------------
+--  HITBOX EXPANDER CONFIG
+-- -----------------------------------------------------
+local hitboxExpanderOn = false
+local HEAD_HITBOX_SIZE = 0  -- 0 = default, max 7
+local HEAD_HITBOX_MAX  = 7
+local headHitboxConn   = nil
+
+-- -----------------------------------------------------
 --  LOGIC HELPERS
 -- -----------------------------------------------------
 
@@ -128,6 +136,53 @@ local function getBestTarget()
 		if d < bestDist then bestDist = d; best = p end
 	end
 	return best
+end
+
+-- -----------------------------------------------------
+--  HITBOX EXPANDER LOGIC
+-- -----------------------------------------------------
+local function applyHitboxExpansion()
+    if headHitboxConn then
+        headHitboxConn:Disconnect()
+        headHitboxConn = nil
+    end
+    
+    if not hitboxExpanderOn or HEAD_HITBOX_SIZE <= 0 then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                local char = p.Character
+                if char then
+                    local head = char:FindFirstChild("Head")
+                    if head then
+                        head.Size = Vector3.new(2, 1, 1)
+                    end
+                end
+            end
+        end
+        return
+    end
+    
+    headHitboxConn = RunService.Heartbeat:Connect(function()
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p == LocalPlayer then continue end
+            local char = p.Character
+            if not char then continue end
+            local head = char:FindFirstChild("Head")
+            if head then
+                local theirArena = getPlayerArena(p)
+                local myArena = getLocalArena()
+                if myArena and theirArena == myArena then
+                    head.Size = Vector3.new(
+                        2 + HEAD_HITBOX_SIZE,
+                        1 + HEAD_HITBOX_SIZE * 0.5,
+                        1 + HEAD_HITBOX_SIZE * 0.5
+                    )
+                else
+                    head.Size = Vector3.new(2, 1, 1)
+                end
+            end
+        end
+    end)
 end
 
 -- -----------------------------------------------------
@@ -1054,7 +1109,7 @@ local SettingsPanel = Instance.new("ScrollingFrame", TabContainer)
 SettingsPanel.Size                = UDim2.new(0, 240, 1, 0)
 SettingsPanel.Position            = UDim2.new(0, 240, 0, 0)
 SettingsPanel.BackgroundTransparency = 1
-SettingsPanel.CanvasSize          = UDim2.new(0, 0, 0, 258)
+SettingsPanel.CanvasSize          = UDim2.new(0, 0, 0, 330)
 SettingsPanel.ScrollBarThickness  = 3
 SettingsPanel.ScrollBarImageColor3 = Color3.fromRGB(230, 230, 230)
 SettingsPanel.ScrollBarImageTransparency = 0.5
@@ -1275,6 +1330,132 @@ DJPowerUnit.TextColor3         = Color3.fromRGB(80, 80, 80)
 DJPowerUnit.TextSize           = 9
 DJPowerUnit.Font               = Enum.Font.GothamBold
 DJPowerUnit.ZIndex             = 7
+
+-- -- Hitbox Expander row --------------------------------
+local HEDivider = Instance.new("Frame", SettingsPanel)
+HEDivider.Size             = UDim2.new(1, -24, 0, 1)
+HEDivider.Position         = UDim2.new(0, 12, 0, 202)  -- Adjust Y position as needed
+HEDivider.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+HEDivider.BorderSizePixel  = 0
+
+local HERow = Instance.new("Frame", SettingsPanel)
+HERow.Size               = UDim2.new(1, -24, 0, 44)
+HERow.Position           = UDim2.new(0, 12, 0, 211)  -- Adjust Y position as needed
+HERow.BackgroundColor3   = Color3.fromRGB(12, 12, 12)
+HERow.BorderSizePixel    = 0
+Instance.new("UICorner", HERow).CornerRadius = UDim.new(0, 9)
+local HERowStroke = Instance.new("UIStroke", HERow)
+HERowStroke.Color        = Color3.fromRGB(40, 40, 40)
+HERowStroke.Thickness    = 1
+HERowStroke.Transparency = 0.25
+
+local HEDot = Instance.new("Frame", HERow)
+HEDot.Size             = UDim2.new(0, 6, 0, 6)
+HEDot.Position         = UDim2.new(0, 12, 0.5, -3)
+HEDot.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+HEDot.BorderSizePixel  = 0
+HEDot.ZIndex           = 4
+Instance.new("UICorner", HEDot).CornerRadius = UDim.new(1, 0)
+
+local HELabel = Instance.new("TextLabel", HERow)
+HELabel.Size               = UDim2.new(1, -58, 0, 16)
+HELabel.Position           = UDim2.new(0, 26, 0, 5)
+HELabel.BackgroundTransparency = 1
+HELabel.Text               = "Hitbox Expander"
+HELabel.TextColor3         = Color3.fromRGB(175, 175, 175)
+HELabel.TextSize           = 10
+HELabel.Font               = Enum.Font.GothamBold
+HELabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local HESubLabel = Instance.new("TextLabel", HERow)
+HESubLabel.Size               = UDim2.new(1, -58, 0, 11)
+HESubLabel.Position           = UDim2.new(0, 26, 1, -14)
+HESubLabel.BackgroundTransparency = 1
+HESubLabel.Text               = "Expands enemy head hitbox"
+HESubLabel.TextColor3         = Color3.fromRGB(70, 70, 70)
+HESubLabel.TextSize           = 8
+HESubLabel.Font               = Enum.Font.Gotham
+HESubLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local HEToggle = Instance.new("TextButton", HERow)
+HEToggle.Size             = UDim2.new(0, 36, 0, 18)
+HEToggle.Position         = UDim2.new(1, -44, 0.5, -9)
+HEToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+HEToggle.Text             = ""
+HEToggle.BorderSizePixel  = 0
+HEToggle.AutoButtonColor  = false
+HEToggle.ZIndex           = 6
+Instance.new("UICorner", HEToggle).CornerRadius = UDim.new(1, 0)
+local HEToggleStroke = Instance.new("UIStroke", HEToggle)
+HEToggleStroke.Color        = Color3.fromRGB(60, 60, 60)
+HEToggleStroke.Thickness    = 1
+HEToggleStroke.Transparency = 0.2
+
+local HEThumb = Instance.new("Frame", HEToggle)
+HEThumb.Size             = UDim2.new(0, 12, 0, 12)
+HEThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+HEThumb.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+HEThumb.BorderSizePixel  = 0
+HEThumb.ZIndex           = 7
+Instance.new("UICorner", HEThumb).CornerRadius = UDim.new(1, 0)
+
+-- Hitbox Size textbox row
+local HESizeDivider = Instance.new("Frame", SettingsPanel)
+HESizeDivider.Size             = UDim2.new(1, -24, 0, 1)
+HESizeDivider.Position         = UDim2.new(0, 12, 0, 263)  -- Adjust Y position as needed
+HESizeDivider.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+HESizeDivider.BorderSizePixel  = 0
+
+local HESizeRow = Instance.new("Frame", SettingsPanel)
+HESizeRow.Size               = UDim2.new(1, -24, 0, 34)
+HESizeRow.Position           = UDim2.new(0, 12, 0, 272)  -- Adjust Y position as needed
+HESizeRow.BackgroundColor3   = Color3.fromRGB(12, 12, 12)
+HESizeRow.BorderSizePixel    = 0
+Instance.new("UICorner", HESizeRow).CornerRadius = UDim.new(0, 9)
+local HESizeRowStroke = Instance.new("UIStroke", HESizeRow)
+HESizeRowStroke.Color        = Color3.fromRGB(40, 40, 40)
+HESizeRowStroke.Thickness    = 1
+HESizeRowStroke.Transparency = 0.25
+
+local HESizeLabel = Instance.new("TextLabel", HESizeRow)
+HESizeLabel.Size               = UDim2.new(0.55, 0, 1, 0)
+HESizeLabel.Position           = UDim2.new(0, 12, 0, 0)
+HESizeLabel.BackgroundTransparency = 1
+HESizeLabel.Text               = "Head Size"
+HESizeLabel.TextColor3         = Color3.fromRGB(175, 175, 175)
+HESizeLabel.TextSize           = 10
+HESizeLabel.Font               = Enum.Font.GothamBold
+HESizeLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local HESizeBox = Instance.new("TextBox", HESizeRow)
+HESizeBox.Size               = UDim2.new(0, 48, 0, 22)
+HESizeBox.Position           = UDim2.new(1, -58, 0.5, -11)
+HESizeBox.BackgroundColor3   = Color3.fromRGB(20, 16, 32)
+HESizeBox.Text               = "0"
+HESizeBox.TextColor3         = Color3.fromRGB(210, 210, 210)
+HESizeBox.TextSize           = 11
+HESizeBox.Font               = Enum.Font.GothamBold
+HESizeBox.ClearTextOnFocus   = false
+HESizeBox.PlaceholderText    = "0 (max 7)"
+HESizeBox.PlaceholderColor3  = Color3.fromRGB(80, 80, 80)
+HESizeBox.BorderSizePixel    = 0
+HESizeBox.ZIndex             = 6
+HESizeBox.TextXAlignment     = Enum.TextXAlignment.Center
+Instance.new("UICorner", HESizeBox).CornerRadius = UDim.new(0, 6)
+local HESizeBoxStroke = Instance.new("UIStroke", HESizeBox)
+HESizeBoxStroke.Color        = Color3.fromRGB(55, 55, 55)
+HESizeBoxStroke.Thickness    = 1
+HESizeBoxStroke.Transparency = 0.2
+
+local HESizeUnit = Instance.new("TextLabel", HESizeRow)
+HESizeUnit.Size               = UDim2.new(0, 16, 0, 14)
+HESizeUnit.Position           = UDim2.new(1, -12, 0.5, -7)
+HESizeUnit.BackgroundTransparency = 1
+HESizeUnit.Text               = "st"
+HESizeUnit.TextColor3         = Color3.fromRGB(80, 80, 80)
+HESizeUnit.TextSize           = 9
+HESizeUnit.Font               = Enum.Font.GothamBold
+HESizeUnit.ZIndex             = 7
 
 -- -- Status Gui toggle row ----------------------------
 local SGDivider = Instance.new("Frame", SettingsPanel)
@@ -1654,6 +1835,58 @@ BombStudsBox.FocusLost:Connect(function()
 		tw(BombStudsBoxStroke, { Color = Color3.fromRGB(200, 60, 60) }, 0.12)
 		task.delay(0.6, function() tw(BombStudsBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
 	end
+end)
+
+-- -- Hitbox Expander toggle handler ------------------------
+local function applyHEToggle()
+    if hitboxExpanderOn then
+        tw(HEToggle,      { BackgroundColor3 = Color3.fromRGB(40, 40, 40) }, 0.18)
+        tw(HEThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = Color3.fromRGB(220, 220, 220) }, 0.2, Enum.EasingStyle.Back)
+        tw(HEToggleStroke,{ Color = Color3.fromRGB(230, 230, 230) }, 0.18)
+        tw(HEDot,         { BackgroundColor3 = Color3.fromRGB(230, 230, 230) }, 0.2)
+        tw(HELabel,       { TextColor3 = Color3.fromRGB(220, 220, 220) }, 0.2)
+        tw(HERowStroke,   { Color = Color3.fromRGB(50, 50, 50), Transparency = 0.08 }, 0.2)
+    else
+        tw(HEToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 22) }, 0.18)
+        tw(HEThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(100, 100, 100) }, 0.2, Enum.EasingStyle.Back)
+        tw(HEToggleStroke,{ Color = Color3.fromRGB(60, 60, 60) }, 0.18)
+        tw(HEDot,         { BackgroundColor3 = Color3.fromRGB(55, 55, 55) }, 0.2)
+        tw(HELabel,       { TextColor3 = Color3.fromRGB(175, 175, 175) }, 0.2)
+        tw(HERowStroke,   { Color = Color3.fromRGB(40, 40, 40), Transparency = 0.25 }, 0.2)
+    end
+    applyHitboxExpansion()
+end
+
+HEToggle.MouseButton1Click:Connect(function()
+    hitboxExpanderOn = not hitboxExpanderOn
+    applyHEToggle()
+end)
+HEToggle.MouseEnter:Connect(function()
+    tw(HERow, { BackgroundColor3 = Color3.fromRGB(20, 20, 20) }, 0.12)
+end)
+HEToggle.MouseLeave:Connect(function()
+    tw(HERow, { BackgroundColor3 = Color3.fromRGB(12, 12, 12) }, 0.12)
+end)
+
+-- Hitbox Size textbox handler
+HESizeBox.FocusLost:Connect(function()
+    local val = tonumber(HESizeBox.Text)
+    if val then
+        val = math.clamp(math.floor(val), 0, HEAD_HITBOX_MAX)
+        HEAD_HITBOX_SIZE = val
+        HESizeBox.Text = tostring(HEAD_HITBOX_SIZE)
+        tw(HESizeBoxStroke, { Color = Color3.fromRGB(180, 180, 180) }, 0.12)
+        task.delay(0.6, function()
+            tw(HESizeBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3)
+        end)
+        if hitboxExpanderOn then applyHitboxExpansion() end
+    else
+        HESizeBox.Text = tostring(HEAD_HITBOX_SIZE)
+        tw(HESizeBoxStroke, { Color = Color3.fromRGB(200, 60, 60) }, 0.12)
+        task.delay(0.6, function()
+            tw(HESizeBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3)
+        end)
+    end
 end)
 
 -- =====================================================
