@@ -370,7 +370,7 @@ local function applyLimbHitbox(char)
         local origSize = OriginalSizes[char] and OriginalSizes[char][name]
         if limb and limb:IsA("BasePart") and origSize then
             limb.Transparency = 1
-            limb.CanCollide = true
+            limb.CanCollide = false
             limb.Size = origSize * hitboxSize
         end
     end
@@ -383,7 +383,7 @@ local function resetLimbHitbox(char)
             local limb = char:FindFirstChild(name)
             if limb and limb:IsA("BasePart") then
                 limb.Transparency = 0
-                limb.CanCollide = true
+                limb.CanCollide = false
                 limb.Size = size
             end
         end
