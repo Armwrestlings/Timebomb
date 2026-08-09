@@ -1,8 +1,7 @@
 -- +======================================================+
 -- |            AUTO TRACK v5  |  WindUI Edition          |
--- |  Merged Logic + WindUI Interface                     |
+-- |  Enemy ESP + Auto Track + Hitbox + Auto Bomb         |
 -- +======================================================+
-
 local Players       = game:GetService("Players")
 local RunService    = game:GetService("RunService")
 local TweenService  = game:GetService("TweenService")
@@ -40,7 +39,6 @@ local JUMP_COOLDOWN         = 0.65
 local MOVETO_REFRESH        = 0.12
 local HOLD_DURATION         = 2.0
 local DOUBLE_JUMP_POWER     = 0.6
-local LINE_ESP_DISTANCE     = 40
 local HITBOX_MAX_SIZE       = 4.4
 local AUTOBOMB_COUNTDOWN    = 3
 local AUTOBOMB_STUDS        = 15
@@ -57,11 +55,6 @@ local lastJump      = 0
 local lastMoveTime  = 0
 local currentTarget = nil
 
-local lineEspOn         = false
-local lineEspLines      = {}
-local lineEspHighlights = {}
-local lineEspConn       = nil
-
 local autoBomb     = false
 local autoBombConn = nil
 
@@ -74,6 +67,10 @@ local hitboxOn       = false
 local hitboxSize     = 1.0
 local OriginalSizes  = {}
 local ModifiedChars  = {}
+
+local enemyEspOn     = false
+local enemyEspConn   = nil
+local enemyEspHighlights = {} -- [player] = Highlight
 
 local statusGuiOn    = false
 local miniLocked     = false
@@ -94,13 +91,17 @@ local uiRefs = {
 -- =====================================================
 --  LOGIC HELPERS
 -- =====================================================
-local ESP_TAG = "__AutoTrackESP__"
+local ESP_TAG = "__AutoTrackEnemyESP__"
 
-local function hasHighlight(char)
+local function hasGreenHighlight(char)
     if not char then return false end
     for _, v in ipairs(char:GetDescendants()) do
         if v:IsA("Highlight") and not v:GetAttribute(ESP_TAG) then
-            return true
+            -- Check if it's green (teammate indicator)
+            local color = v.FillColor or v.OutlineColor
+            if color and color.G > 0.5 and color.R < 0.4 and color.B < 0.4 then
+                return true
+            end
         end
     end
     return false
@@ -209,7 +210,7 @@ local function startTracking()
                 local pRoot = pChar:FindFirstChild("HumanoidRootPart")
                 local pHum  = pChar:FindFirstChildOfClass("Humanoid")
                 if not pRoot or not pHum or pHum.Health <= 0 then continue end
-                if hasHighlight(pChar) then continue end
+                if hasGreenHighlight(pChar) then continue end
                 if charHasTool(pChar) then continue end
                 local theirArena = getPlayerArena(p)
                 if theirArena ~= myArena then continue end
@@ -434,129 +435,74 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- =====================================================
---  LINE ESP
+--  ENEMY ESP (Replaces Line ESP)
 -- =====================================================
-local Camera = workspace.CurrentCamera
-local ESP_FILL_COLOR    = Color3.fromRGB(230, 230, 230)
-local ESP_OUTLINE_COLOR = Color3.fromRGB(255, 200, 200)
-
--- We need a ScreenGui just for ESP lines (WindUI doesn't support raw tracer frames)
-local EspSG = Instance.new("ScreenGui")
-EspSG.Name = "AutoTrackEspLines"
-EspSG.ResetOnSpawn = false
-EspSG.DisplayOrder = 998
-EspSG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-EspSG.Parent = LocalPlayer:WaitForChild("PlayerGui")
-
 local function removeEspForPlayer(p)
-    local entry = lineEspLines[p]
-    if entry and entry.line and entry.line.Parent then entry.line:Destroy() end
-    lineEspLines[p] = nil
-    local hl = lineEspHighlights[p]
+    local hl = enemyEspHighlights[p]
     if hl and hl.Parent then hl:Destroy() end
-    lineEspHighlights[p] = nil
+    enemyEspHighlights[p] = nil
 end
 
-local function clearAllEsp()
+local function clearAllEnemyEsp()
     local keys = {}
-    for p in pairs(lineEspLines) do keys[#keys+1] = p end
+    for p in pairs(enemyEspHighlights) do keys[#keys+1] = p end
     for _, p in ipairs(keys) do removeEspForPlayer(p) end
-    local hkeys = {}
-    for p in pairs(lineEspHighlights) do hkeys[#hkeys+1] = p end
-    for _, p in ipairs(hkeys) do
-        local hl = lineEspHighlights[p]
-        if hl and hl.Parent then hl:Destroy() end
-        lineEspHighlights[p] = nil
-    end
 end
 
-local function stopLineEsp()
-    if lineEspConn then lineEspConn:Disconnect(); lineEspConn = nil end
-    clearAllEsp()
+local function stopEnemyEsp()
+    if enemyEspConn then enemyEspConn:Disconnect(); enemyEspConn = nil end
+    clearAllEnemyEsp()
 end
 
-local function startLineEsp()
-    if lineEspConn then return end
-    lineEspConn = RunService.RenderStepped:Connect(function()
-        local myRoot = getRoot()
-        if not myRoot then return end
-        local myChar  = LocalPlayer.Character
-        local myTorso = myChar and (myChar:FindFirstChild("UpperTorso") or myChar:FindFirstChild("Torso"))
-        local myOriginPart = myTorso or myRoot
-        local myScreenRaw, myOnScreen = Camera:WorldToViewportPoint(myOriginPart.Position)
-        local vp = Camera.ViewportSize
-        local originScreen
-        if myOnScreen and myScreenRaw.Z > 0 then
-            originScreen = Vector2.new(myScreenRaw.X, myScreenRaw.Y)
-        else
-            originScreen = Vector2.new(vp.X / 2, vp.Y / 2)
-        end
-
-        local validPlayers = {}
+local function startEnemyEsp()
+    if enemyEspConn then return end
+    enemyEspConn = RunService.Heartbeat:Connect(function()
+        local myArena = getLocalArena()
+        
         for _, p in ipairs(Players:GetPlayers()) do
             if p == LocalPlayer then continue end
+            
             local char = p.Character
-            if not char then continue end
-            local pRoot = char:FindFirstChild("HumanoidRootPart")
-            local pHum  = char:FindFirstChildOfClass("Humanoid")
-            if not pRoot or not pHum or pHum.Health <= 0 then continue end
-            if hasHighlight(char) then continue end
-            local dist = (pRoot.Position - myRoot.Position).Magnitude
-            if dist > LINE_ESP_DISTANCE then continue end
-            local pTorso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or pRoot
-            validPlayers[p] = { root = pRoot, torso = pTorso, char = char, dist = dist }
-        end
-
-        local stale = {}
-        for p in pairs(lineEspLines) do if not validPlayers[p] then stale[#stale+1] = p end end
-        for _, p in ipairs(stale) do removeEspForPlayer(p) end
-        local staleH = {}
-        for p in pairs(lineEspHighlights) do if not validPlayers[p] then staleH[#staleH+1] = p end end
-        for _, p in ipairs(staleH) do
-            local hl = lineEspHighlights[p]
-            if hl and hl.Parent then hl:Destroy() end
-            lineEspHighlights[p] = nil
-        end
-
-        for p, info in pairs(validPlayers) do
-            if not lineEspHighlights[p] or not lineEspHighlights[p].Parent then
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            
+            -- Clean up if player died, left arena, or no longer valid
+            if not char or not hum or hum.Health <= 0 
+                or not myArena or getPlayerArena(p) ~= myArena then
+                if enemyEspHighlights[p] then
+                    removeEspForPlayer(p)
+                end
+                continue
+            end
+            
+            -- Check if teammate (green highlight exists)
+            if hasGreenHighlight(char) then
+                -- Teammate: remove our red ESP if it exists
+                if enemyEspHighlights[p] then
+                    removeEspForPlayer(p)
+                end
+                continue
+            end
+            
+            -- Enemy: add red highlight if not already present
+            if not enemyEspHighlights[p] or not enemyEspHighlights[p].Parent then
                 local hl = Instance.new("Highlight")
                 hl:SetAttribute(ESP_TAG, true)
-                hl.FillColor = ESP_FILL_COLOR
-                hl.OutlineColor = ESP_OUTLINE_COLOR
-                hl.FillTransparency = 0.72
-                hl.OutlineTransparency = 0.0
+                hl.FillColor = Color3.fromRGB(255, 50, 50)
+                hl.OutlineColor = Color3.fromRGB(200, 0, 0)
+                hl.FillTransparency = 0.7
+                hl.OutlineTransparency = 0
                 hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                hl.Adornee = info.char
-                hl.Parent = info.char
-                lineEspHighlights[p] = hl
+                hl.Adornee = char
+                hl.Parent = char
+                enemyEspHighlights[p] = hl
             end
-            if not lineEspLines[p] then
-                local line = Instance.new("Frame")
-                line.BackgroundColor3 = ESP_FILL_COLOR
-                line.BorderSizePixel = 0
-                line.AnchorPoint = Vector2.new(0.5, 0.5)
-                line.ZIndex = 200
-                Instance.new("UICorner", line).CornerRadius = UDim.new(1, 0)
-                line.Parent = EspSG
-                lineEspLines[p] = { line = line }
+        end
+        
+        -- Clean up stale entries (players who left)
+        for p in pairs(enemyEspHighlights) do
+            if not Players:FindFirstChild(p.Name) then
+                removeEspForPlayer(p)
             end
-            local line = lineEspLines[p].line
-            local tScreenRaw, tOnScreen = Camera:WorldToViewportPoint(info.torso.Position)
-            if not tOnScreen or tScreenRaw.Z < 0 then line.Visible = false; continue end
-            local targetScreen = Vector2.new(tScreenRaw.X, tScreenRaw.Y)
-            line.Visible = true
-            local dx = targetScreen.X - originScreen.X
-            local dy = targetScreen.Y - originScreen.Y
-            local len = math.sqrt(dx * dx + dy * dy)
-            local ang = math.atan2(dy, dx) * (180 / math.pi) + 90
-            local midX = (originScreen.X + targetScreen.X) * 0.5
-            local midY = (originScreen.Y + targetScreen.Y) * 0.5
-            line.Size = UDim2.new(0, 2, 0, len)
-            line.Position = UDim2.new(0, midX, 0, midY)
-            line.Rotation = ang
-            local t = math.clamp(info.dist / LINE_ESP_DISTANCE, 0, 1)
-            line.BackgroundColor3 = Color3.fromRGB(255, math.floor(55 + t * 145), 55)
         end
     end)
 end
@@ -717,7 +663,6 @@ end
 --  LIVE UPDATE LOOP (for WindUI labels + status overlay)
 -- =====================================================
 RunService.Heartbeat:Connect(function()
-    -- Update main panel target/status labels
     if tracking then
         if not localHasTool() then
             if uiRefs.StatusVal then uiRefs.StatusVal:SetTitle("NO TOOL") end
@@ -740,11 +685,12 @@ end)
 --  WINDUI INTERFACE
 -- =====================================================
 local Window = WindUI:CreateWindow({
-    Title = "Auto Track v5",
+    Title = "Timebomb Duels",
     Folder = "autotrack",
     Icon = "solar:radar-bold",
+    Theme = "Crimson",
     NewElements = true,
-    HideSearchBar = false,
+    HideSearchBar = true,
     OpenButton = {
         Title = "Auto Track",
         CornerRadius = UDim.new(1, 0),
@@ -752,7 +698,7 @@ local Window = WindUI:CreateWindow({
         Enabled = true,
         Draggable = true,
         OnlyMobile = false,
-        Scale = 0.5,
+        Scale = 1,
         Color = ColorSequence.new(
             Color3.fromHex("#E0E0E0"),
             Color3.fromHex("#A0A0A0")
@@ -760,12 +706,12 @@ local Window = WindUI:CreateWindow({
     },
     Topbar = {
         Height = 44,
-        ButtonsType = "Mac",
+        ButtonsType = "Default",
     },
 })
 
 Window:Tag({
-    Title = "v5",
+    Title = "v1",
     Icon = "tag",
     Color = Color3.fromHex("#1c1c1c"),
     Border = true,
@@ -796,7 +742,7 @@ uiRefs.StatusVal = StatusSection:Paragraph({
 MainTab:Space()
 uiRefs.TrackToggle = MainTab:Toggle({
     Title = "Auto Track",
-    Desc = "Hold-to-toggle via keybind recommended",
+    Desc = "Auto tracks the nearest player",
     Value = false,
     Callback = function(state)
         tracking = state
@@ -869,7 +815,7 @@ uiRefs.HBToggle = HBSection:Toggle({
 
 HBSection:Slider({
     Title = "Hitbox Size Multiplier",
-    Desc = "Max 4.4x — higher = bigger limbs",
+    Desc = "Max 4.4x",
     IsTooltip = true,
     Step = 0.1,
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
@@ -927,12 +873,12 @@ local VisSection = SettingsTab:Section({
 })
 
 uiRefs.ESPToggle = VisSection:Toggle({
-    Title = "Line ESP",
-    Desc = "Tracer lines + outline to nearby enemies (" .. LINE_ESP_DISTANCE .. " studs)",
+    Title = "Enemy ESP",
+    Desc = "Red highlight on enemies in your arena (skips green teammates)",
     Value = false,
     Callback = function(state)
-        lineEspOn = state
-        if lineEspOn then startLineEsp() else stopLineEsp() end
+        enemyEspOn = state
+        if enemyEspOn then startEnemyEsp() else stopEnemyEsp() end
     end,
 })
 
@@ -954,7 +900,6 @@ SettingsTab:Keybind({
     Value = "F",
     Callback = function(keyName)
         -- WindUI handles keybind internally; we just need to sync state
-        -- The toggle callback above already handles start/stop
     end,
 })
 
@@ -968,13 +913,13 @@ local AboutTab = Window:Tab({
 })
 
 AboutTab:Section({
-    Title = "Auto Track v5 — WindUI Edition",
+    Title = "Timebomb Duels",
     TextSize = 18,
     FontWeight = Enum.FontWeight.SemiBold,
 })
 AboutTab:Space()
 AboutTab:Section({
-    Title = "Features:\n• Auto Track (nearest target, same arena)\n• Auto Get Bomb (countdown-aware grabbing)\n• Double Jump (airborne boost)\n• Hitbox Expander (limb resize up to 4.4x)\n• Line ESP (tracer + highlight outline)\n• Draggable Status Overlay (FPS/Ping/Track)\n\nUI powered by WindUI by Footagesus.",
+    Title = "Features:\n• Auto Track (nearest target)\n• Auto Get Bomb (countdown-aware grabbing)\n• Double Jump (airborne boost)\n• Hitbox Expander (resize up to 4.4x)\n• Enemy ESP (red outline, skips green teammates)\n• Draggable Status Overlay (FPS/Ping/Track)\n\nUI powered by WindUI by Footagesus.",
     TextSize = 14,
     TextTransparency = 0.35,
     FontWeight = Enum.FontWeight.Medium,
@@ -992,8 +937,7 @@ AboutTab:Button({
         stopAutoBomb()
         stopDoubleJump()
         resetAllLimbs()
-        stopLineEsp()
-        EspSG:Destroy()
+        stopEnemyEsp()
         StatusWin.Parent:Destroy()
         Window:Destroy()
     end,
