@@ -20,6 +20,12 @@ local HOLD_DURATION         = 2.0
 local DOUBLE_JUMP_POWER     = 0.6  -- multiplier of normal JumpPower (0.5 = half height, 1.0 = full height)
 local LINE_ESP_DISTANCE     = 40  -- studs radius for ESP (players within this get lines + outline)
 -- (fixed internally, no longer user-configurable)
+local HITBOX_MAX_SIZE = 4.4
+local LIMB_NAMES = {
+    "LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+    "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
+    "Left Arm", "Right Arm", "Left Leg", "Right Leg"
+}
 
 -- -----------------------------------------------------
 --  STATE
@@ -49,6 +55,10 @@ local AUTOBOMB_STUDS     = 15
 local doubleJumpOn    = false  -- Double Jump toggle
 local doubleJumpUsed  = false  -- tracks if air jump already used this flight
 local doubleJumpConn  = nil
+local hitboxOn = false
+local hitboxSize = 1.0
+local OriginalSizes = {} 
+local ModifiedChars = {} 
 
 -- -----------------------------------------------------
 --  LOGIC HELPERS
@@ -381,6 +391,70 @@ local function stopAutoBomb()
 	end
 end
 
+-- Hitbox
+local function cacheOriginalSizes(char)
+    if OriginalSizes[char] then return end
+    OriginalSizes[char] = {}
+    for _, name in ipairs(LIMB_NAMES) do
+        local limb = char:FindFirstChild(name)
+        if limb and limb:IsA("BasePart") then
+            OriginalSizes[char][name] = limb.Size
+        end
+    end
+end
+
+local function applyLimbHitbox(char)
+    if ModifiedChars[char] then return end
+    cacheOriginalSizes(char)
+    ModifiedChars[char] = true
+    for _, name in ipairs(LIMB_NAMES) do
+        local limb = char:FindFirstChild(name)
+        local origSize = OriginalSizes[char] and OriginalSizes[char][name]
+        if limb and limb:IsA("BasePart") and origSize then
+            limb.Transparency = 1
+            limb.CanCollide = true
+            limb.Size = origSize * hitboxSize
+        end
+    end
+end
+
+local function resetLimbHitbox(char)
+    if not ModifiedChars[char] then return end
+    if OriginalSizes[char] then
+        for name, size in pairs(OriginalSizes[char]) do
+            local limb = char:FindFirstChild(name)
+            if limb and limb:IsA("BasePart") then
+                limb.Transparency = 0
+                limb.CanCollide = true
+                limb.Size = size
+            end
+        end
+    end
+    ModifiedChars[char] = nil
+end
+
+local function updateAllLimbs()
+    if not hitboxOn then return end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            if char then
+                ModifiedChars[char] = nil
+                applyLimbHitbox(char)
+            end
+        end
+    end
+end
+
+local function resetAllLimbs()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            if char then resetLimbHitbox(char) end
+        end
+    end
+end
+
 -- =====================================================
 --  DOUBLE JUMP  (one extra jump while airborne)
 -- =====================================================
@@ -646,7 +720,7 @@ end
 --  UIStroke / shadow sit outside fine.
 -- =====================================================
 
-local WIN_H = 300  -- main panel height
+local WIN_H = 370  -- main panel height
 
 local Win = Instance.new("Frame", SG)
 Win.Name             = "Window"
@@ -1048,6 +1122,88 @@ BombStatusVal.TextSize           = 8
 BombStatusVal.Font               = Enum.Font.Gotham
 BombStatusVal.TextXAlignment     = Enum.TextXAlignment.Left
 BombStatusVal.ZIndex             = 4
+
+-- -- HITBOX EXPANDER Card (main panel) -----------------
+local HBCard = Instance.new("Frame", MainPanel)
+HBCard.Size             = UDim2.new(1, -24, 0, 56)
+HBCard.Position         = UDim2.new(0, 12, 0, 194) -- Positioned below BombCard
+HBCard.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+HBCard.BorderSizePixel  = 0
+Instance.new("UICorner", HBCard).CornerRadius = UDim.new(0, 10)
+local HBCardStroke = Instance.new("UIStroke", HBCard)
+HBCardStroke.Color        = Color3.fromRGB(50, 50, 50)
+HBCardStroke.Thickness    = 1
+HBCardStroke.Transparency = 0.3
+
+local HBDot = Instance.new("Frame", HBCard)
+HBDot.Size             = UDim2.new(0, 6, 0, 6)
+HBDot.Position         = UDim2.new(0, 12, 0, 10)
+HBDot.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+HBDot.BorderSizePixel  = 0
+HBDot.ZIndex           = 4
+Instance.new("UICorner", HBDot).CornerRadius = UDim.new(1, 0)
+
+local HBLabel = Instance.new("TextLabel", HBCard)
+HBLabel.Size               = UDim2.new(1, -58, 0, 16)
+HBLabel.Position           = UDim2.new(0, 26, 0, 4)
+HBLabel.BackgroundTransparency = 1
+HBLabel.Text               = "Hitbox Expander"
+HBLabel.TextColor3         = Color3.fromRGB(175, 175, 175)
+HBLabel.TextSize           = 10
+HBLabel.Font               = Enum.Font.GothamBold
+HBLabel.TextXAlignment     = Enum.TextXAlignment.Left
+
+local HBToggle = Instance.new("TextButton", HBCard)
+HBToggle.Size             = UDim2.new(0, 36, 0, 18)
+HBToggle.Position         = UDim2.new(1, -44, 0, 4)
+HBToggle.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+HBToggle.Text             = ""
+HBToggle.BorderSizePixel  = 0
+HBToggle.AutoButtonColor  = false
+HBToggle.ZIndex           = 6
+Instance.new("UICorner", HBToggle).CornerRadius = UDim.new(1, 0)
+local HBToggleStroke = Instance.new("UIStroke", HBToggle)
+HBToggleStroke.Color        = Color3.fromRGB(60, 60, 60)
+HBToggleStroke.Thickness    = 1
+HBToggleStroke.Transparency = 0.2
+
+local HBThumb = Instance.new("Frame", HBToggle)
+HBThumb.Size             = UDim2.new(0, 12, 0, 12)
+HBThumb.Position         = UDim2.new(0, 3, 0.5, -6)
+HBThumb.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+HBThumb.BorderSizePixel  = 0
+HBThumb.ZIndex           = 7
+Instance.new("UICorner", HBThumb).CornerRadius = UDim.new(1, 0)
+
+local HBSizeBox = Instance.new("TextBox", HBCard)
+HBSizeBox.Size               = UDim2.new(0, 48, 0, 22)
+HBSizeBox.Position           = UDim2.new(1, -58, 0, 30)
+HBSizeBox.BackgroundColor3   = Color3.fromRGB(20, 16, 32)
+HBSizeBox.Text               = "1.0"
+HBSizeBox.TextColor3         = Color3.fromRGB(210, 210, 210)
+HBSizeBox.TextSize           = 11
+HBSizeBox.Font               = Enum.Font.GothamBold
+HBSizeBox.ClearTextOnFocus   = false
+HBSizeBox.PlaceholderText    = "1.0"
+HBSizeBox.PlaceholderColor3  = Color3.fromRGB(80, 80, 80)
+HBSizeBox.BorderSizePixel    = 0
+HBSizeBox.ZIndex             = 6
+HBSizeBox.TextXAlignment     = Enum.TextXAlignment.Center
+Instance.new("UICorner", HBSizeBox).CornerRadius = UDim.new(0, 6)
+local HBSizeBoxStroke = Instance.new("UIStroke", HBSizeBox)
+HBSizeBoxStroke.Color        = Color3.fromRGB(55, 55, 55)
+HBSizeBoxStroke.Thickness    = 1
+HBSizeBoxStroke.Transparency = 0.2
+
+local HBUnit = Instance.new("TextLabel", HBCard)
+HBUnit.Size               = UDim2.new(0, 16, 0, 14)
+HBUnit.Position           = UDim2.new(1, -12, 0, 34)
+HBUnit.BackgroundTransparency = 1
+HBUnit.Text               = "x"
+HBUnit.TextColor3         = Color3.fromRGB(80, 80, 80)
+HBUnit.TextSize           = 9
+HBUnit.Font               = Enum.Font.GothamBold
+HBUnit.ZIndex             = 7
 
 -- -- SETTINGS PANEL ----------------------------------
 local SettingsPanel = Instance.new("ScrollingFrame", TabContainer)
@@ -1656,6 +1812,48 @@ BombStudsBox.FocusLost:Connect(function()
 	end
 end)
 
+-- -- Hitbox Expander toggle handler ---------------------
+local function applyHBToggle()
+    if hitboxOn then
+        tw(HBToggle,      { BackgroundColor3 = Color3.fromRGB(40, 40, 40) }, 0.18)
+        tw(HBThumb,       { Position = UDim2.new(1, -15, 0.5, -6), BackgroundColor3 = Color3.fromRGB(220, 220, 220) }, 0.2, Enum.EasingStyle.Back)
+        tw(HBToggleStroke,{ Color = Color3.fromRGB(230, 230, 230) }, 0.18)
+        tw(HBDot,         { BackgroundColor3 = Color3.fromRGB(230, 230, 230) }, 0.2)
+        tw(HBLabel,       { TextColor3 = Color3.fromRGB(220, 220, 220) }, 0.2)
+        tw(HBCardStroke,  { Color = Color3.fromRGB(80, 80, 80), Transparency = 0.1 }, 0.2)
+        updateAllLimbs()
+    else
+        tw(HBToggle,      { BackgroundColor3 = Color3.fromRGB(22, 22, 22) }, 0.18)
+        tw(HBThumb,       { Position = UDim2.new(0, 3, 0.5, -6), BackgroundColor3 = Color3.fromRGB(100, 100, 100) }, 0.2, Enum.EasingStyle.Back)
+        tw(HBToggleStroke,{ Color = Color3.fromRGB(60, 60, 60) }, 0.18)
+        tw(HBDot,         { BackgroundColor3 = Color3.fromRGB(55, 55, 55) }, 0.2)
+        tw(HBLabel,       { TextColor3 = Color3.fromRGB(175, 175, 175) }, 0.2)
+        tw(HBCardStroke,  { Color = Color3.fromRGB(50, 50, 50), Transparency = 0.3 }, 0.2)
+        resetAllLimbs()
+    end
+end
+
+HBToggle.MouseButton1Click:Connect(function()
+    hitboxOn = not hitboxOn
+    applyHBToggle()
+end)
+
+HBSizeBox.FocusLost:Connect(function()
+    local val = tonumber(HBSizeBox.Text)
+    if val then
+        val = math.clamp(math.floor(val * 10 + 0.5) / 10, 1.0, HITBOX_MAX_SIZE)
+        hitboxSize = val
+        HBSizeBox.Text = tostring(hitboxSize)
+        tw(HBSizeBoxStroke, { Color = Color3.fromRGB(180, 180, 180) }, 0.12)
+        task.delay(0.6, function() tw(HBSizeBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
+        if hitboxOn then updateAllLimbs() end
+    else
+        HBSizeBox.Text = tostring(hitboxSize)
+        tw(HBSizeBoxStroke, { Color = Color3.fromRGB(230, 230, 230) }, 0.12)
+        task.delay(0.6, function() tw(HBSizeBoxStroke, { Color = Color3.fromRGB(55, 55, 55) }, 0.3) end)
+    end
+end)
+
 -- =====================================================
 --  SETTINGS TAB NAVIGATION
 -- =====================================================
@@ -2131,6 +2329,28 @@ RunService.Heartbeat:Connect(function()
 		ShadFrame.Size     = UDim2.new(0, as.X + 36, 0, as.Y + 36)
 	end
 	updateStatusGui()
+end)
+
+-- -- Hitbox respawn handling ----------------------------
+local function onCharAddedForHitbox(player)
+    if player == LocalPlayer then return end
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.5)
+        if hitboxOn then
+            ModifiedChars[char] = nil
+            applyLimbHitbox(char)
+        end
+    end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do onCharAddedForHitbox(p) end
+Players.PlayerAdded:Connect(onCharAddedForHitbox)
+Players.PlayerRemoving:Connect(function(player)
+    local char = player.Character
+    if char then
+        OriginalSizes[char] = nil
+        ModifiedChars[char] = nil
+    end
 end)
 
 -- =====================================================
