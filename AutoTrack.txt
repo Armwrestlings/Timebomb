@@ -39,7 +39,7 @@ local JUMP_COOLDOWN         = 0.65
 local MOVETO_REFRESH        = 0.12
 local HOLD_DURATION         = 2.0
 local DOUBLE_JUMP_POWER     = 0.6
-local HITBOX_MAX_SIZE       = 4.4
+local HITBOX_MAX_SIZE       = 4.5
 local AUTOBOMB_COUNTDOWN    = 3
 local AUTOBOMB_STUDS        = 15
 
@@ -356,10 +356,7 @@ local function startHitboxLoop()
             if not hum or hum.Health <= 0 then continue end
             for _, part in ipairs(char:GetChildren()) do
                 if part:IsA("BasePart") and (
-                    part.Name == "Head"
-                    or part.Name == "HumanoidRootPart"
-                    or part.Name:find("Torso")
-                    or part.Name:find("Arm")
+                    part.Name:find("Arm")
                     or part.Name:find("Leg")
                 ) then
                     if not hbOriginalSizes[part] then
@@ -367,18 +364,13 @@ local function startHitboxLoop()
                     end
                     if hitboxSize > 1 then
                         part.Size = hbOriginalSizes[part] * hitboxSize
-                        -- Head stays visible, everything else invisible
-                        if part.Name == "Head" then
-                            part.Transparency = 0
-                        else
-                            part.Transparency = 1
-                        end
+                        part.Transparency = 1
                         part.CanCollide = false
                         part.Massless = true
                     else
                         part.Size = hbOriginalSizes[part]
-                        part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0
-                        part.CanCollide = (part.Name ~= "HumanoidRootPart")
+                        part.Transparency = 0
+                        part.CanCollide = true
                         part.Massless = false
                     end
                 end
@@ -750,7 +742,7 @@ local HBSection = MainTab:Section({
 
 uiRefs.HBToggle = HBSection:Toggle({
     Title = "Enable Hitbox Expander",
-    Desc = "Uniform scale on all body parts (no launch)",
+    Desc = "Expands the hitbox for easier pass",
     Value = false,
     Callback = function(state)
         hitboxOn = state
@@ -760,7 +752,7 @@ uiRefs.HBToggle = HBSection:Toggle({
 
 HBSection:Slider({
     Title = "Hitbox Size Multiplier",
-    Desc = "Max 4.4x — applied every frame",
+    Desc = "Max 4.5x",
     IsTooltip = true,
     Step = 0.1,
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
