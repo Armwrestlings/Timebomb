@@ -367,7 +367,12 @@ local function startHitboxLoop()
                     end
                     if hitboxSize > 1 then
                         part.Size = hbOriginalSizes[part] * hitboxSize
-                        part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0.5
+                        -- Head stays visible, everything else invisible
+                        if part.Name == "Head" then
+                            part.Transparency = 0
+                        else
+                            part.Transparency = 1
+                        end
                         part.CanCollide = false
                         part.Massless = true
                     else
