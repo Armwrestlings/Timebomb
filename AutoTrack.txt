@@ -631,7 +631,7 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- =====================================================
---  WINDUI INTERFACE
+--  WINDUI INTERFACE (Enhanced Design)
 -- =====================================================
 local Window = WindUI:CreateWindow({
     Title = "Timebomb Duels",
@@ -639,32 +639,34 @@ local Window = WindUI:CreateWindow({
     Icon = "solar:radar-bold",
     Theme = "Crimson",
     NewElements = true,
-    HideSearchBar = true,
+    HideSearchBar = false,
     OpenButton = {
         Title = "Timebomb Duels | V1",
         CornerRadius = UDim.new(1, 0),
-        StrokeThickness = 3,
+        StrokeThickness = 2,
         Enabled = true,
         Draggable = true,
         OnlyMobile = false,
-        Scale = 1,
+        Scale = 0.6,
         Color = ColorSequence.new(
-            Color3.fromHex("#E0E0E0"),
-            Color3.fromHex("#A0A0A0")
+            Color3.fromHex("#FF4830"),
+            Color3.fromHex("#E0E0E0")
         ),
     },
     Topbar = {
         Height = 44,
-        ButtonsType = "Default",
+        ButtonsType = "Mac",
     },
 })
 
 Window:Tag({
     Title = "v1",
     Icon = "tag",
-    Color = Color3.fromHex("#1c1c1c"),
+    Color = Color3.fromHex("#FF4830"),
     Border = true,
 })
+
+Window:SetPanelBackground(false)
 
 -- ==================== MAIN TAB ====================
 local MainTab = Window:Tab({
@@ -675,7 +677,14 @@ local MainTab = Window:Tab({
     Border = true,
 })
 
-local StatusSection = MainTab:Section({ Title = "Live Status" })
+-- Live Status Group
+local StatusGroup = MainTab:Group({})
+local StatusSection = StatusGroup:Section({
+    Title = "Live Status",
+    Box = true,
+    BoxBorder = true,
+    Opened = true,
+})
 
 uiRefs.TargetVal = StatusSection:Paragraph({
     Title = "Target",
@@ -686,10 +695,11 @@ uiRefs.StatusVal = StatusSection:Paragraph({
     Desc = "IDLE",
 })
 
+-- Auto Track Toggle (standalone with icon emphasis)
 MainTab:Space()
 uiRefs.TrackToggle = MainTab:Toggle({
     Title = "Auto Track",
-    Desc = "Auto tracks the nearest player",
+    Desc = "Automatically track nearest enemy in arena",
     Value = false,
     Callback = function(state)
         tracking = state
@@ -697,9 +707,11 @@ uiRefs.TrackToggle = MainTab:Toggle({
     end,
 })
 
+-- Auto Get Bomb Section
 MainTab:Space()
 local BombSection = MainTab:Section({
     Title = "Auto Get Bomb",
+    Desc = "Smart bomb grabbing with countdown awareness",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -707,7 +719,7 @@ local BombSection = MainTab:Section({
 
 uiRefs.BombToggle = BombSection:Toggle({
     Title = "Enable Auto Get Bomb",
-    Desc = "Automatically grab bomb from nearest carrier",
+    Desc = "Grab bomb from nearest carrier automatically",
     Value = false,
     Callback = function(state)
         autoBomb = state
@@ -719,6 +731,8 @@ BombSection:Slider({
     Title = "Grab Countdown Threshold",
     Desc = "Grab when carrier countdown <= this value",
     Step = 1,
+    IsTooltip = true,
+    Icons = { From = "solar:timer-bold" },
     Value = { Min = 1, Max = 10, Default = AUTOBOMB_COUNTDOWN },
     Callback = function(v) AUTOBOMB_COUNTDOWN = v end,
 })
@@ -727,6 +741,8 @@ BombSection:Slider({
     Title = "Max Studs to Carrier",
     Desc = "Only attempt grab within this range",
     Step = 1,
+    IsTooltip = true,
+    Icons = { From = "solar:ruler-angular-bold" },
     Value = { Min = 5, Max = 100, Default = AUTOBOMB_STUDS },
     Callback = function(v) AUTOBOMB_STUDS = v end,
 })
@@ -736,10 +752,11 @@ uiRefs.BombStatusVal = BombSection:Paragraph({
     Desc = "-",
 })
 
--- Hitbox Expander Card
+-- Hitbox Expander Section
 MainTab:Space()
 local HBSection = MainTab:Section({
     Title = "Hitbox Expander",
+    Desc = "Uniform scale on all body parts (no launch)",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -747,7 +764,7 @@ local HBSection = MainTab:Section({
 
 uiRefs.HBToggle = HBSection:Toggle({
     Title = "Enable Hitbox Expander",
-    Desc = "Uniform scale on all body parts (no launch)",
+    Desc = "Expand enemy hitboxes for easier hits",
     Value = false,
     Callback = function(state)
         hitboxOn = state
@@ -757,9 +774,10 @@ uiRefs.HBToggle = HBSection:Toggle({
 
 HBSection:Slider({
     Title = "Hitbox Size Multiplier",
-    Desc = "Max 4.4x — applied every frame",
+    Desc = "Applied every frame via RenderStepped",
     IsTooltip = true,
     Step = 0.1,
+    Icons = { From = "solar:maximize-square-bold" },
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
     Callback = function(v)
         hitboxSize = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, HITBOX_MAX_SIZE)
@@ -775,14 +793,16 @@ local SettingsTab = Window:Tab({
     Border = true,
 })
 
-local DJSection = SettingsTab:Section({
+-- Movement Section
+local MoveSection = SettingsTab:Section({
     Title = "Movement",
+    Desc = "Jump and mobility enhancements",
     Box = true,
     BoxBorder = true,
     Opened = true,
 })
 
-uiRefs.DJToggle = DJSection:Toggle({
+uiRefs.DJToggle = MoveSection:Toggle({
     Title = "Double Jump",
     Desc = "One extra jump while airborne",
     Value = false,
@@ -792,20 +812,23 @@ uiRefs.DJToggle = DJSection:Toggle({
     end,
 })
 
-DJSection:Slider({
+MoveSection:Slider({
     Title = "Double Jump Power",
     Desc = "Multiplier of normal JumpPower",
     IsTooltip = true,
     Step = 0.05,
+    Icons = { From = "solar:arrow-up-bold" },
     Value = { Min = 0.3, Max = 1.0, Default = DOUBLE_JUMP_POWER },
     Callback = function(v)
         DOUBLE_JUMP_POWER = math.clamp(math.floor(v * 100 + 0.5) / 100, 0.3, 1.0)
     end,
 })
 
+-- Visuals Section
 SettingsTab:Space()
 local VisSection = SettingsTab:Section({
     Title = "Visuals",
+    Desc = "ESP and overlay options",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -813,7 +836,7 @@ local VisSection = SettingsTab:Section({
 
 uiRefs.ESPToggle = VisSection:Toggle({
     Title = "Enemy ESP",
-    Desc = "Red highlight on enemies in your arena (skips green teammates)",
+    Desc = "Red highlight on enemies (skips green teammates)",
     Value = false,
     Callback = function(state)
         enemyEspOn = state
@@ -831,9 +854,17 @@ uiRefs.SGToggle = VisSection:Toggle({
     end,
 })
 
+-- Keybind Section
 SettingsTab:Space()
-SettingsTab:Keybind({
-    Title = "Toggle Auto Track Keybind",
+local KBSection = SettingsTab:Section({
+    Title = "Keybinds",
+    Box = true,
+    BoxBorder = true,
+    Opened = true,
+})
+
+KBSection:Keybind({
+    Title = "Toggle Auto Track",
     Desc = "Press to toggle tracking on/off",
     Value = "F",
     Callback = function(keyName) end,
@@ -850,18 +881,21 @@ local AboutTab = Window:Tab({
 
 AboutTab:Section({
     Title = "Timebomb Duels",
-    TextSize = 18,
-    FontWeight = Enum.FontWeight.SemiBold,
-})
-AboutTab:Space()
-AboutTab:Section({
-    Title = "Features:\n• Auto Track (nearest target)\n• Auto Get Bomb (countdown-aware grabbing)\n• Double Jump (airborne boost)\n• Hitbox Expander (uniform scale, no launch)\n• Enemy ESP (red outline, skips green teammates)\n• Draggable Status Overlay (FPS/Ping/Track)\n\nUI powered by WindUI by Footagesus.",
-    TextSize = 14,
-    TextTransparency = 0.35,
-    FontWeight = Enum.FontWeight.Medium,
+    TextSize = 22,
+    FontWeight = Enum.FontWeight.Bold,
 })
 
 AboutTab:Space()
+
+AboutTab:Section({
+    Title = "Features:\n• Auto Track — nearest target in same arena\n• Auto Get Bomb — countdown-aware smart grabbing\n• Double Jump — configurable airborne boost\n• Hitbox Expander — uniform scale, no-launch engine\n• Enemy ESP — red outline, skips green teammates\n• Status Overlay — draggable FPS/Ping/Track panel\n\nUI powered by WindUI by Footagesus.",
+    TextSize = 14,
+    TextTransparency = 0.3,
+    FontWeight = Enum.FontWeight.Medium,
+})
+
+AboutTab:Space({ Columns = 2 })
+
 AboutTab:Button({
     Title = "Destroy Window",
     Color = Color3.fromHex("#ff4830"),
