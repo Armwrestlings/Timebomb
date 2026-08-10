@@ -62,7 +62,7 @@ local hitboxSize     = 1.0
 local manualHbOn     = false
 local manualWidth    = 1.0
 local manualHeight   = 1.0
-local MANUAL_HB_MAX  = 6
+local MANUAL_HB_MAX  = 8
 
 local enemyEspOn     = false
 local enemyEspConn   = nil
