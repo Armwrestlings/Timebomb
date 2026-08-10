@@ -369,9 +369,15 @@ local function applyLimbHitbox(char)
         local limb = char:FindFirstChild(name)
         local origSize = OriginalSizes[char] and OriginalSizes[char][name]
         if limb and limb:IsA("BasePart") and origSize then
+            -- Disable joints BEFORE resizing to prevent torque
+            for _, child in ipairs(limb:GetChildren()) do
+                if child:IsA("Motor6D") then
+                    child.Enabled = false
+                end
+            end
             limb.Transparency = 1
             limb.CanCollide = false
-            limb.Massless = true       -- ← THIS IS WHAT YOU'RE MISSING
+            limb.Massless = true
             limb.Size = origSize * hitboxSize
         end
     end
@@ -383,9 +389,15 @@ local function resetLimbHitbox(char)
         for name, size in pairs(OriginalSizes[char]) do
             local limb = char:FindFirstChild(name)
             if limb and limb:IsA("BasePart") then
+                -- Re-enable joints BEFORE restoring size
+                for _, child in ipairs(limb:GetChildren()) do
+                    if child:IsA("Motor6D") then
+                        child.Enabled = true
+                    end
+                end
                 limb.Transparency = 0
                 limb.CanCollide = false
-                limb.Massless = false  -- ← RESTORE ON RESET
+                limb.Massless = false
                 limb.Size = size
             end
         end
