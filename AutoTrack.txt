@@ -360,7 +360,8 @@ local function startHitboxLoop()
             if not hum or hum.Health <= 0 then continue end
             for _, part in ipairs(char:GetChildren()) do
                 if part:IsA("BasePart") then
-                    if part.Name == "Head" then
+                    -- Resize Arms and Legs only
+                    if part.Name:find("Arm") or part.Name:find("Leg") then
                         if not hbOriginalSizes[part] then
                             hbOriginalSizes[part] = part.Size
                         end
@@ -385,7 +386,8 @@ local function startHitboxLoop()
                             part.Massless = false
                         end
                     end
-                    if part.Name:find("Torso") then
+                    -- Disable collision on Torso AND Head (no resize, prevents launch)
+                    if part.Name:find("Torso") or part.Name == "Head" then
                         part.CanCollide = false
                     end
                 end
