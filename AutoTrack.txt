@@ -631,7 +631,7 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- =====================================================
---  WINDUI INTERFACE (Enhanced Design)
+--  WINDUI INTERFACE
 -- =====================================================
 local Window = WindUI:CreateWindow({
     Title = "Timebomb Duels",
@@ -655,7 +655,7 @@ local Window = WindUI:CreateWindow({
     },
     Topbar = {
         Height = 44,
-        ButtonsType = "Mac",
+        ButtonsType = "Default",
     },
 })
 
@@ -666,8 +666,6 @@ Window:Tag({
     Border = true,
 })
 
-Window:SetPanelBackground(false)
-
 -- ==================== MAIN TAB ====================
 local MainTab = Window:Tab({
     Title = "Main",
@@ -677,14 +675,8 @@ local MainTab = Window:Tab({
     Border = true,
 })
 
--- Live Status Group
-local StatusGroup = MainTab:Group({})
-local StatusSection = StatusGroup:Section({
-    Title = "Live Status",
-    Box = true,
-    BoxBorder = true,
-    Opened = true,
-})
+-- Live Status
+local StatusSection = MainTab:Section({ Title = "Live Status" })
 
 uiRefs.TargetVal = StatusSection:Paragraph({
     Title = "Target",
@@ -695,11 +687,11 @@ uiRefs.StatusVal = StatusSection:Paragraph({
     Desc = "IDLE",
 })
 
--- Auto Track Toggle (standalone with icon emphasis)
+-- Auto Track
 MainTab:Space()
 uiRefs.TrackToggle = MainTab:Toggle({
     Title = "Auto Track",
-    Desc = "Automatically track nearest enemy in arena",
+    Desc = "Auto tracks the nearest player",
     Value = false,
     Callback = function(state)
         tracking = state
@@ -707,11 +699,10 @@ uiRefs.TrackToggle = MainTab:Toggle({
     end,
 })
 
--- Auto Get Bomb Section
+-- Auto Get Bomb
 MainTab:Space()
 local BombSection = MainTab:Section({
     Title = "Auto Get Bomb",
-    Desc = "Smart bomb grabbing with countdown awareness",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -719,7 +710,7 @@ local BombSection = MainTab:Section({
 
 uiRefs.BombToggle = BombSection:Toggle({
     Title = "Enable Auto Get Bomb",
-    Desc = "Grab bomb from nearest carrier automatically",
+    Desc = "Automatically grab bomb from nearest carrier",
     Value = false,
     Callback = function(state)
         autoBomb = state
@@ -731,8 +722,6 @@ BombSection:Slider({
     Title = "Grab Countdown Threshold",
     Desc = "Grab when carrier countdown <= this value",
     Step = 1,
-    IsTooltip = true,
-    Icons = { From = "solar:timer-bold" },
     Value = { Min = 1, Max = 10, Default = AUTOBOMB_COUNTDOWN },
     Callback = function(v) AUTOBOMB_COUNTDOWN = v end,
 })
@@ -741,8 +730,6 @@ BombSection:Slider({
     Title = "Max Studs to Carrier",
     Desc = "Only attempt grab within this range",
     Step = 1,
-    IsTooltip = true,
-    Icons = { From = "solar:ruler-angular-bold" },
     Value = { Min = 5, Max = 100, Default = AUTOBOMB_STUDS },
     Callback = function(v) AUTOBOMB_STUDS = v end,
 })
@@ -752,11 +739,10 @@ uiRefs.BombStatusVal = BombSection:Paragraph({
     Desc = "-",
 })
 
--- Hitbox Expander Section
+-- Hitbox Expander
 MainTab:Space()
 local HBSection = MainTab:Section({
     Title = "Hitbox Expander",
-    Desc = "Uniform scale on all body parts (no launch)",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -764,7 +750,7 @@ local HBSection = MainTab:Section({
 
 uiRefs.HBToggle = HBSection:Toggle({
     Title = "Enable Hitbox Expander",
-    Desc = "Expand enemy hitboxes for easier hits",
+    Desc = "Uniform scale on all body parts (no launch)",
     Value = false,
     Callback = function(state)
         hitboxOn = state
@@ -774,29 +760,19 @@ uiRefs.HBToggle = HBSection:Toggle({
 
 HBSection:Slider({
     Title = "Hitbox Size Multiplier",
-    Desc = "Applied every frame via RenderStepped",
+    Desc = "Max 4.4x — applied every frame",
     IsTooltip = true,
     Step = 0.1,
-    Icons = { From = "solar:maximize-square-bold" },
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
     Callback = function(v)
         hitboxSize = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, HITBOX_MAX_SIZE)
     end,
 })
 
--- ==================== SETTINGS TAB ====================
-local SettingsTab = Window:Tab({
-    Title = "Settings",
-    Icon = "solar:settings-bold",
-    IconColor = Color3.fromHex("#7775F2"),
-    IconShape = "Square",
-    Border = true,
-})
-
--- Movement Section
-local MoveSection = SettingsTab:Section({
+-- Movement (moved from Settings)
+MainTab:Space()
+local MoveSection = MainTab:Section({
     Title = "Movement",
-    Desc = "Jump and mobility enhancements",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -817,18 +793,16 @@ MoveSection:Slider({
     Desc = "Multiplier of normal JumpPower",
     IsTooltip = true,
     Step = 0.05,
-    Icons = { From = "solar:arrow-up-bold" },
     Value = { Min = 0.3, Max = 1.0, Default = DOUBLE_JUMP_POWER },
     Callback = function(v)
         DOUBLE_JUMP_POWER = math.clamp(math.floor(v * 100 + 0.5) / 100, 0.3, 1.0)
     end,
 })
 
--- Visuals Section
-SettingsTab:Space()
-local VisSection = SettingsTab:Section({
+-- Visuals (moved from Settings)
+MainTab:Space()
+local VisSection = MainTab:Section({
     Title = "Visuals",
-    Desc = "ESP and overlay options",
     Box = true,
     BoxBorder = true,
     Opened = true,
@@ -836,7 +810,7 @@ local VisSection = SettingsTab:Section({
 
 uiRefs.ESPToggle = VisSection:Toggle({
     Title = "Enemy ESP",
-    Desc = "Red highlight on enemies (skips green teammates)",
+    Desc = "Red highlight on enemies in your arena (skips green teammates)",
     Value = false,
     Callback = function(state)
         enemyEspOn = state
@@ -854,20 +828,122 @@ uiRefs.SGToggle = VisSection:Toggle({
     end,
 })
 
--- Keybind Section
-SettingsTab:Space()
-local KBSection = SettingsTab:Section({
-    Title = "Keybinds",
+-- Keybind (moved from Settings)
+MainTab:Space()
+MainTab:Keybind({
+    Title = "Toggle Auto Track Keybind",
+    Desc = "Press to toggle tracking on/off",
+    Value = "F",
+    Callback = function(keyName) end,
+})
+
+-- ==================== SETTINGS TAB (WindUI Config Only) ====================
+local SettingsTab = Window:Tab({
+    Title = "Settings",
+    Icon = "solar:settings-bold",
+    IconColor = Color3.fromHex("#7775F2"),
+    IconShape = "Square",
+    Border = true,
+})
+
+-- UI Appearance
+local UISection = SettingsTab:Section({
+    Title = "UI Appearance",
     Box = true,
     BoxBorder = true,
     Opened = true,
 })
 
-KBSection:Keybind({
-    Title = "Toggle Auto Track",
-    Desc = "Press to toggle tracking on/off",
-    Value = "F",
-    Callback = function(keyName) end,
+UISection:Toggle({
+    Title = "Transparent Panel Background",
+    Desc = "Remove window background for cleaner look",
+    Value = false,
+    Callback = function(state)
+        Window:SetPanelBackground(not state)
+    end,
+})
+
+UISection:Slider({
+    Title = "UI Scale",
+    Desc = "Adjust overall UI size",
+    IsTooltip = true,
+    Step = 0.05,
+    Value = { Min = 0.6, Max = 1.2, Default = 1.0 },
+    Callback = function(v)
+        Window:SetUIScale(v)
+    end,
+})
+
+-- Config Manager
+SettingsTab:Space()
+local ConfigSection = SettingsTab:Section({
+    Title = "Config Manager",
+    Box = true,
+    BoxBorder = true,
+    Opened = true,
+})
+
+local ConfigManager = Window.ConfigManager
+local configName = "default"
+
+local configNameInput = ConfigSection:Input({
+    Title = "Config Name",
+    Placeholder = "Enter config name...",
+    Value = "default",
+    Callback = function(value)
+        configName = value
+    end,
+})
+
+ConfigSection:Space()
+
+local allConfigs = ConfigManager:AllConfigs()
+local defaultVal = table.find(allConfigs, configName) and configName or nil
+
+local configsDropdown = ConfigSection:Dropdown({
+    Title = "Saved Configs",
+    Desc = "Select an existing config",
+    Values = allConfigs,
+    Value = defaultVal,
+    Callback = function(value)
+        configName = value
+        configNameInput:Set(value)
+    end,
+})
+
+ConfigSection:Space()
+
+ConfigSection:Button({
+    Title = "Save Config",
+    Justify = "Center",
+    Callback = function()
+        Window.CurrentConfig = ConfigManager:Config(configName)
+        if Window.CurrentConfig:Save() then
+            WindUI:Notify({
+                Title = "Config Saved",
+                Content = "Config '" .. configName .. "' saved successfully",
+                Icon = "check",
+            })
+        end
+        configsDropdown:Refresh(ConfigManager:AllConfigs())
+    end,
+})
+
+ConfigSection:Space()
+
+ConfigSection:Button({
+    Title = "Load Config",
+    Justify = "Center",
+    Callback = function()
+        Window.CurrentConfig = ConfigManager:CreateConfig(configName)
+        if Window.CurrentConfig:Load() then
+            WindUI:Notify({
+                Title = "Config Loaded",
+                Content = "Config '" .. configName .. "' loaded successfully",
+                Icon = "refresh-cw",
+            })
+        end
+    end,
 })
 
 -- ==================== ABOUT TAB ====================
@@ -888,7 +964,7 @@ AboutTab:Section({
 AboutTab:Space()
 
 AboutTab:Section({
-    Title = "Features:\n• Auto Track — nearest target in same arena\n• Auto Get Bomb — countdown-aware smart grabbing\n• Double Jump — configurable airborne boost\n• Hitbox Expander — uniform scale, no-launch engine\n• Enemy ESP — red outline, skips green teammates\n• Status Overlay — draggable FPS/Ping/Track panel\n\nUI powered by WindUI by Footagesus.",
+    Title = "Features:\n• Auto Track — nearest target in same arena\n• Auto Get Bomb — countdown-aware smart grabbing\n• Double Jump — configurable airborne boost\n• Hitbox Expander — uniform scale, no-launch engine\n• Enemy ESP — red outline, skips green teammates\n• Status Overlay — draggable FPS/Ping/Track panel\n• Config Manager — save/load presets\n\nUI powered by WindUI by Footagesus.",
     TextSize = 14,
     TextTransparency = 0.3,
     FontWeight = Enum.FontWeight.Medium,
