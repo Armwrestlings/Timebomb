@@ -43,12 +43,6 @@ local HITBOX_MAX_SIZE       = 4.4
 local AUTOBOMB_COUNTDOWN    = 3
 local AUTOBOMB_STUDS        = 15
 
-local LIMB_NAMES = {
-"LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
-"LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
-"Left Arm", "Right Arm", "Left Leg", "Right Leg"
-}
-
 local tracking      = false
 local trackConn     = nil
 local lastJump      = 0
@@ -65,12 +59,10 @@ local doubleJumpInputConn = nil
 
 local hitboxOn       = false
 local hitboxSize     = 1.0
-local OriginalSizes  = {}
-local ModifiedChars  = {}
 
 local enemyEspOn     = false
 local enemyEspConn   = nil
-local enemyEspHighlights = {} -- [player] = Highlight
+local enemyEspHighlights = {}
 
 local statusGuiOn    = false
 local miniLocked     = false
@@ -97,7 +89,6 @@ local function hasGreenHighlight(char)
     if not char then return false end
     for _, v in ipairs(char:GetDescendants()) do
         if v:IsA("Highlight") and not v:GetAttribute(ESP_TAG) then
-            -- Check if it's green (teammate indicator)
             local color = v.FillColor or v.OutlineColor
             if color and color.G > 0.5 and color.R < 0.4 and color.B < 0.4 then
                 return true
@@ -348,108 +339,64 @@ local function startDoubleJump()
 end
 
 -- =====================================================
---  HITBOX EXPANDER
+--  HITBOX EXPANDER (RenderStepped engine from 8u9Ezmwd)
 -- =====================================================
-local function cacheOriginalSizes(char)
-    if OriginalSizes[char] then return end
-    OriginalSizes[char] = {}
-    for _, name in ipairs(LIMB_NAMES) do
-        local limb = char:FindFirstChild(name)
-        if limb and limb:IsA("BasePart") then
-            OriginalSizes[char][name] = limb.Size
-        end
-    end
-end
+local hbOriginalSizes = {}
+local hbConn = nil
 
-local function applyLimbHitbox(char)
-    if ModifiedChars[char] then return end
-    cacheOriginalSizes(char)
-    ModifiedChars[char] = true
-    for _, name in ipairs(LIMB_NAMES) do
-        local limb = char:FindFirstChild(name)
-        local origSize = OriginalSizes[char] and OriginalSizes[char][name]
-        if limb and limb:IsA("BasePart") and origSize then
-            -- Disable joints BEFORE resizing to prevent torque
-            for _, child in ipairs(limb:GetChildren()) do
-                if child:IsA("Motor6D") then
-                    child.Enabled = false
-                end
-            end
-            limb.Transparency = 1
-            limb.CanCollide = false
-            limb.Massless = true
-            limb.Size = origSize * hitboxSize
-        end
-    end
-end
-
-local function resetLimbHitbox(char)
-    if not ModifiedChars[char] then return end
-    if OriginalSizes[char] then
-        for name, size in pairs(OriginalSizes[char]) do
-            local limb = char:FindFirstChild(name)
-            if limb and limb:IsA("BasePart") then
-                -- Re-enable joints BEFORE restoring size
-                for _, child in ipairs(limb:GetChildren()) do
-                    if child:IsA("Motor6D") then
-                        child.Enabled = true
+local function startHitboxLoop()
+    if hbConn then return end
+    hbConn = RunService.RenderStepped:Connect(function()
+        if not hitboxOn then return end
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            local char = player.Character
+            if not char then continue end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then continue end
+            for _, part in ipairs(char:GetChildren()) do
+                if part:IsA("BasePart") and (
+                    part.Name == "Head"
+                    or part.Name == "HumanoidRootPart"
+                    or part.Name:find("Torso")
+                    or part.Name:find("Arm")
+                    or part.Name:find("Leg")
+                ) then
+                    if not hbOriginalSizes[part] then
+                        hbOriginalSizes[part] = part.Size
+                    end
+                    if hitboxSize > 1 then
+                        part.Size = hbOriginalSizes[part] * hitboxSize
+                        part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0.5
+                        part.CanCollide = false
+                        part.Massless = true
+                    else
+                        part.Size = hbOriginalSizes[part]
+                        part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0
+                        part.CanCollide = (part.Name ~= "HumanoidRootPart")
+                        part.Massless = false
                     end
                 end
-                limb.Transparency = 0
-                limb.CanCollide = false
-                limb.Massless = false
-                limb.Size = size
             end
-        end
-    end
-    ModifiedChars[char] = nil
-end
-
-local function updateAllLimbs()
-    if not hitboxOn then return end
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            if char then
-                ModifiedChars[char] = nil
-                applyLimbHitbox(char)
-            end
-        end
-    end
-end
-
-local function resetAllLimbs()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            if char then resetLimbHitbox(char) end
-        end
-    end
-end
-
--- Hitbox respawn handling
-local function onCharAddedForHitbox(player)
-    if player == LocalPlayer then return end
-    player.CharacterAdded:Connect(function(char)
-        task.wait(0.5)
-        if hitboxOn then
-            ModifiedChars[char] = nil
-            applyLimbHitbox(char)
         end
     end)
 end
-for _, p in ipairs(Players:GetPlayers()) do onCharAddedForHitbox(p) end
-Players.PlayerAdded:Connect(onCharAddedForHitbox)
-Players.PlayerRemoving:Connect(function(player)
-    local char = player.Character
-    if char then
-        OriginalSizes[char] = nil
-        ModifiedChars[char] = nil
+
+local function stopHitboxLoop()
+    if hbConn then hbConn:Disconnect(); hbConn = nil end
+    for part, size in pairs(hbOriginalSizes) do
+        if part and part.Parent then
+            part.Size = size
+            part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0
+            part.CanCollide = (part.Name ~= "HumanoidRootPart")
+            part.Massless = false
+        end
     end
-end)
+    hbOriginalSizes = {}
+end
 
 -- =====================================================
---  ENEMY ESP (Replaces Line ESP)
+--  ENEMY ESP
 -- =====================================================
 local function removeEspForPlayer(p)
     local hl = enemyEspHighlights[p]
@@ -472,32 +419,19 @@ local function startEnemyEsp()
     if enemyEspConn then return end
     enemyEspConn = RunService.Heartbeat:Connect(function()
         local myArena = getLocalArena()
-        
         for _, p in ipairs(Players:GetPlayers()) do
             if p == LocalPlayer then continue end
-            
             local char = p.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
-            
-            -- Clean up if player died, left arena, or no longer valid
-            if not char or not hum or hum.Health <= 0 
+            if not char or not hum or hum.Health <= 0
                 or not myArena or getPlayerArena(p) ~= myArena then
-                if enemyEspHighlights[p] then
-                    removeEspForPlayer(p)
-                end
+                if enemyEspHighlights[p] then removeEspForPlayer(p) end
                 continue
             end
-            
-            -- Check if teammate (green highlight exists)
             if hasGreenHighlight(char) then
-                -- Teammate: remove our red ESP if it exists
-                if enemyEspHighlights[p] then
-                    removeEspForPlayer(p)
-                end
+                if enemyEspHighlights[p] then removeEspForPlayer(p) end
                 continue
             end
-            
-            -- Enemy: add red highlight if not already present
             if not enemyEspHighlights[p] or not enemyEspHighlights[p].Parent then
                 local hl = Instance.new("Highlight")
                 hl:SetAttribute(ESP_TAG, true)
@@ -511,18 +445,14 @@ local function startEnemyEsp()
                 enemyEspHighlights[p] = hl
             end
         end
-        
-        -- Clean up stale entries (players who left)
         for p in pairs(enemyEspHighlights) do
-            if not Players:FindFirstChild(p.Name) then
-                removeEspForPlayer(p)
-            end
+            if not Players:FindFirstChild(p.Name) then removeEspForPlayer(p) end
         end
     end)
 end
 
 -- =====================================================
---  STATUS GUI OVERLAY (kept as separate draggable panel)
+--  STATUS GUI OVERLAY
 -- =====================================================
 local StatusWin, SW_TrackVal, SW_BombVal, SW_FpsVal, SW_PingVal
 do
@@ -674,7 +604,7 @@ local function updateStatusGui()
 end
 
 -- =====================================================
---  LIVE UPDATE LOOP (for WindUI labels + status overlay)
+--  LIVE UPDATE LOOP
 -- =====================================================
 RunService.Heartbeat:Connect(function()
     if tracking then
@@ -740,7 +670,6 @@ local MainTab = Window:Tab({
     Border = true,
 })
 
--- Live status rows
 local StatusSection = MainTab:Section({ Title = "Live Status" })
 
 uiRefs.TargetVal = StatusSection:Paragraph({
@@ -752,7 +681,6 @@ uiRefs.StatusVal = StatusSection:Paragraph({
     Desc = "IDLE",
 })
 
--- Auto Track Toggle
 MainTab:Space()
 uiRefs.TrackToggle = MainTab:Toggle({
     Title = "Auto Track",
@@ -760,15 +688,10 @@ uiRefs.TrackToggle = MainTab:Toggle({
     Value = false,
     Callback = function(state)
         tracking = state
-        if tracking then
-            startTracking()
-        else
-            stopTracking()
-        end
+        if tracking then startTracking() else stopTracking() end
     end,
 })
 
--- Auto Get Bomb Card
 MainTab:Space()
 local BombSection = MainTab:Section({
     Title = "Auto Get Bomb",
@@ -819,23 +742,22 @@ local HBSection = MainTab:Section({
 
 uiRefs.HBToggle = HBSection:Toggle({
     Title = "Enable Hitbox Expander",
-    Desc = "Expand enemy limb hitboxes for easier hits",
+    Desc = "Uniform scale on all body parts (no launch)",
     Value = false,
     Callback = function(state)
         hitboxOn = state
-        if hitboxOn then updateAllLimbs() else resetAllLimbs() end
+        if hitboxOn then startHitboxLoop() else stopHitboxLoop() end
     end,
 })
 
 HBSection:Slider({
     Title = "Hitbox Size Multiplier",
-    Desc = "Max 4.4x",
+    Desc = "Max 4.4x — applied every frame",
     IsTooltip = true,
     Step = 0.1,
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
     Callback = function(v)
         hitboxSize = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, HITBOX_MAX_SIZE)
-        if hitboxOn then updateAllLimbs() end
     end,
 })
 
@@ -848,7 +770,6 @@ local SettingsTab = Window:Tab({
     Border = true,
 })
 
--- Double Jump
 local DJSection = SettingsTab:Section({
     Title = "Movement",
     Box = true,
@@ -877,7 +798,6 @@ DJSection:Slider({
     end,
 })
 
--- Visuals
 SettingsTab:Space()
 local VisSection = SettingsTab:Section({
     Title = "Visuals",
@@ -906,15 +826,12 @@ uiRefs.SGToggle = VisSection:Toggle({
     end,
 })
 
--- Keybind
 SettingsTab:Space()
 SettingsTab:Keybind({
     Title = "Toggle Auto Track Keybind",
     Desc = "Press to toggle tracking on/off",
     Value = "F",
-    Callback = function(keyName)
-        -- WindUI handles keybind internally; we just need to sync state
-    end,
+    Callback = function(keyName) end,
 })
 
 -- ==================== ABOUT TAB ====================
@@ -933,7 +850,7 @@ AboutTab:Section({
 })
 AboutTab:Space()
 AboutTab:Section({
-    Title = "Features:\n• Auto Track (nearest target)\n• Auto Get Bomb (countdown-aware grabbing)\n• Double Jump (airborne boost)\n• Hitbox Expander (resize up to 4.4x)\n• Enemy ESP (red outline, skips green teammates)\n• Draggable Status Overlay (FPS/Ping/Track)\n\nUI powered by WindUI by Footagesus.",
+    Title = "Features:\n• Auto Track (nearest target)\n• Auto Get Bomb (countdown-aware grabbing)\n• Double Jump (airborne boost)\n• Hitbox Expander (uniform scale, no launch)\n• Enemy ESP (red outline, skips green teammates)\n• Draggable Status Overlay (FPS/Ping/Track)\n\nUI powered by WindUI by Footagesus.",
     TextSize = 14,
     TextTransparency = 0.35,
     FontWeight = Enum.FontWeight.Medium,
@@ -950,7 +867,7 @@ AboutTab:Button({
         stopTracking()
         stopAutoBomb()
         stopDoubleJump()
-        resetAllLimbs()
+        stopHitboxLoop()
         stopEnemyEsp()
         StatusWin.Parent:Destroy()
         Window:Destroy()
