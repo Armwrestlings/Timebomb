@@ -339,10 +339,27 @@ local function startDoubleJump()
 end
 
 -- =====================================================
---  HITBOX EXPANDER (RenderStepped engine from 8u9Ezmwd)
+--  HITBOX EXPANDER (Clone-based, original character untouched)
 -- =====================================================
-local hbOriginalSizes = {}
+local hbClones = {} -- [char] = { [partName] = clonePart }
 local hbConn = nil
+local HB_WELD_NAME = "__HBWeld__"
+
+local function getLimbParts(char)
+    local parts = {}
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("BasePart") and (
+            child.Name == "Head"
+            or child.Name == "HumanoidRootPart"
+            or child.Name:find("Torso")
+            or child.Name:find("Arm")
+            or child.Name:find("Leg")
+        ) then
+            parts[child.Name] = child
+        end
+    end
+    return parts
+end
 
 local function startHitboxLoop()
     if hbConn then return end
@@ -354,33 +371,36 @@ local function startHitboxLoop()
             if not char then continue end
             local hum = char:FindFirstChildOfClass("Humanoid")
             if not hum or hum.Health <= 0 then continue end
-            for _, part in ipairs(char:GetChildren()) do
-                if part:IsA("BasePart") and (
-                    part.Name == "Head"
-                    or part.Name == "HumanoidRootPart"
-                    or part.Name:find("Torso")
-                    or part.Name:find("Arm")
-                    or part.Name:find("Leg")
-                ) then
-                    if not hbOriginalSizes[part] then
-                        hbOriginalSizes[part] = part.Size
-                    end
-                    if hitboxSize > 1 then
-                        part.Size = hbOriginalSizes[part] * hitboxSize
-                        -- Head stays visible, everything else invisible
-                        if part.Name == "Head" then
-                            part.Transparency = 0
-                        else
-                            part.Transparency = 1
-                        end
-                        part.CanCollide = false
-                        part.Massless = true
-                    else
-                        part.Size = hbOriginalSizes[part]
-                        part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0
-                        part.CanCollide = (part.Name ~= "HumanoidRootPart")
-                        part.Massless = false
-                    end
+
+            -- Create or update clones for this character
+            if not hbClones[char] then hbClones[char] = {} end
+            local limbParts = getLimbParts(char)
+
+            for name, limb in pairs(limbParts) do
+                local clone = hbClones[char][name]
+                if not clone or not clone.Parent then
+                    clone = Instance.new("Part")
+                    clone.Name = "__HBClone_" .. name
+                    clone.Transparency = 1
+                    clone.CanCollide = false
+                    clone.Massless = true
+                    clone.Anchored = false
+                    clone.CastShadow = false
+                    clone.Material = Enum.Material.SmoothPlastic
+                    clone.Color = Color3.fromRGB(255, 0, 0)
+                    clone.Parent = char
+                    hbClones[char][name] = clone
+                end
+                -- Match position/rotation of original limb every frame
+                clone.CFrame = limb.CFrame
+                clone.Size = limb.Size * hitboxSize
+            end
+
+            -- Clean up clones for limbs that no longer exist
+            for cname, clone in pairs(hbClones[char]) do
+                if not limbParts[cname] and clone and clone.Parent then
+                    clone:Destroy()
+                    hbClones[char][cname] = nil
                 end
             end
         end
@@ -389,15 +409,13 @@ end
 
 local function stopHitboxLoop()
     if hbConn then hbConn:Disconnect(); hbConn = nil end
-    for part, size in pairs(hbOriginalSizes) do
-        if part and part.Parent then
-            part.Size = size
-            part.Transparency = (part.Name == "HumanoidRootPart") and 1 or 0
-            part.CanCollide = (part.Name ~= "HumanoidRootPart")
-            part.Massless = false
+    -- Destroy all clones
+    for char, clones in pairs(hbClones) do
+        for _, clone in pairs(clones) do
+            if clone and clone.Parent then clone:Destroy() end
         end
     end
-    hbOriginalSizes = {}
+    hbClones = {}
 end
 
 -- =====================================================
