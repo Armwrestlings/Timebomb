@@ -46,8 +46,7 @@ local AUTOBOMB_STUDS        = 15
 local LIMB_NAMES = {
 "LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
 "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
-"Left Arm", "Right Arm", "Left Leg", "Right Leg",
-"Torso"
+"Left Arm", "Right Arm", "Left Leg", "Right Leg"
 }
 
 local tracking      = false
@@ -372,6 +371,7 @@ local function applyLimbHitbox(char)
         if limb and limb:IsA("BasePart") and origSize then
             limb.Transparency = 1
             limb.CanCollide = false
+            limb.Massless = true       -- ← THIS IS WHAT YOU'RE MISSING
             limb.Size = origSize * hitboxSize
         end
     end
@@ -385,6 +385,7 @@ local function resetLimbHitbox(char)
             if limb and limb:IsA("BasePart") then
                 limb.Transparency = 0
                 limb.CanCollide = false
+                limb.Massless = false  -- ← RESTORE ON RESET
                 limb.Size = size
             end
         end
