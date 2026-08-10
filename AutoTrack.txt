@@ -39,7 +39,7 @@ local JUMP_COOLDOWN         = 0.65
 local MOVETO_REFRESH        = 0.12
 local HOLD_DURATION         = 2.0
 local DOUBLE_JUMP_POWER     = 0.6
-local HITBOX_MAX_SIZE       = 4.5
+local HITBOX_MAX_SIZE       = 6
 local AUTOBOMB_COUNTDOWN    = 3
 local AUTOBOMB_STUDS        = 15
 
@@ -356,8 +356,8 @@ local function startHitboxLoop()
             if not hum or hum.Health <= 0 then continue end
             for _, part in ipairs(char:GetChildren()) do
                 if part:IsA("BasePart") then
-                    -- Resize Arms and Legs only
-                    if part.Name:find("Arm") or part.Name:find("Leg") then
+                    -- Resize Head only
+                    if part.Name == "Head" then
                         if not hbOriginalSizes[part] then
                             hbOriginalSizes[part] = part.Size
                         end
@@ -373,7 +373,7 @@ local function startHitboxLoop()
                             part.Massless = false
                         end
                     end
-                    -- Disable collision on Torso (no resize)
+                    -- Disable collision on Torso (no resize, prevents launch)
                     if part.Name:find("Torso") then
                         part.CanCollide = false
                     end
@@ -656,7 +656,7 @@ local Window = WindUI:CreateWindow({
         Enabled = true,
         Draggable = true,
         OnlyMobile = false,
-        Scale = 0.6,
+        Scale = 1,
         Color = ColorSequence.new(
             Color3.fromHex("#FF4830"),
             Color3.fromHex("#E0E0E0")
