@@ -59,6 +59,10 @@ local doubleJumpInputConn = nil
 
 local hitboxOn       = false
 local hitboxSize     = 1.0
+local manualHbOn     = false
+local manualWidth    = 1.0
+local manualHeight   = 1.0
+local MANUAL_HB_MAX  = 6
 
 local enemyEspOn     = false
 local enemyEspConn   = nil
@@ -347,7 +351,7 @@ local hbConn = nil
 local function startHitboxLoop()
     if hbConn then return end
     hbConn = RunService.RenderStepped:Connect(function()
-        if not hitboxOn then return end
+        if not hitboxOn and not manualHbOn then return end
         for _, player in ipairs(Players:GetPlayers()) do
             if player == LocalPlayer then continue end
             local char = player.Character
@@ -356,12 +360,20 @@ local function startHitboxLoop()
             if not hum or hum.Health <= 0 then continue end
             for _, part in ipairs(char:GetChildren()) do
                 if part:IsA("BasePart") then
-                    -- Resize Head only
                     if part.Name == "Head" then
                         if not hbOriginalSizes[part] then
                             hbOriginalSizes[part] = part.Size
                         end
-                        if hitboxSize > 1 then
+                        if manualHbOn then
+                            part.Size = Vector3.new(
+                                hbOriginalSizes[part].X * manualWidth,
+                                hbOriginalSizes[part].Y * manualHeight,
+                                hbOriginalSizes[part].Z * manualWidth
+                            )
+                            part.Transparency = 1
+                            part.CanCollide = false
+                            part.Massless = true
+                        elseif hitboxOn then
                             part.Size = hbOriginalSizes[part] * hitboxSize
                             part.Transparency = 1
                             part.CanCollide = false
@@ -373,7 +385,6 @@ local function startHitboxLoop()
                             part.Massless = false
                         end
                     end
-                    -- Disable collision on Torso (no resize, prevents launch)
                     if part.Name:find("Torso") then
                         part.CanCollide = false
                     end
@@ -763,18 +774,53 @@ uiRefs.HBToggle = HBSection:Toggle({
     Value = false,
     Callback = function(state)
         hitboxOn = state
-        if hitboxOn then startHitboxLoop() else stopHitboxLoop() end
+        if hitboxOn or manualHbOn then startHitboxLoop() else stopHitboxLoop() end
     end,
 })
 
 HBSection:Slider({
-    Title = "Hitbox Size Multiplier",
-    Desc = "Max 4.5x",
+    Title = "Normal Hitbox",
+    Desc = "Max 6x",
     IsTooltip = true,
     Step = 0.1,
     Value = { Min = 1.0, Max = HITBOX_MAX_SIZE, Default = 1.0 },
     Callback = function(v)
         hitboxSize = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, HITBOX_MAX_SIZE)
+    end,
+})
+
+-- Manual Hitbox Expander
+HBSection:Space()
+
+local ManualHBToggle = HBSection:Toggle({
+    Title = "Manual Hitbox Expander",
+    Desc = "Custom width and height multipliers",
+    Value = false,
+    Callback = function(state)
+        manualHbOn = state
+        if hitboxOn or manualHbOn then startHitboxLoop() else stopHitboxLoop() end
+    end,
+})
+
+HBSection:Slider({
+    Title = "Width",
+    Desc = "Horizontal size multiplier",
+    IsTooltip = true,
+    Step = 0.1,
+    Value = { Min = 1.0, Max = MANUAL_HB_MAX, Default = 1.0 },
+    Callback = function(v)
+        manualWidth = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, MANUAL_HB_MAX)
+    end,
+})
+
+HBSection:Slider({
+    Title = "Height",
+    Desc = "Vertical size multiplier",
+    IsTooltip = true,
+    Step = 0.1,
+    Value = { Min = 1.0, Max = MANUAL_HB_MAX, Default = 1.0 },
+    Callback = function(v)
+        manualHeight = math.clamp(math.floor(v * 10 + 0.5) / 10, 1.0, MANUAL_HB_MAX)
     end,
 })
 
